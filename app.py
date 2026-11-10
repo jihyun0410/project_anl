@@ -36,7 +36,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
     parentElement.appendChild(box);
   }
   box.onclick = (ev) => {
-    const fold = ev.target.closest(".ct-f");
+    const fold = ev.target.closest(".ct-f, .ct-b");  // ▾ or anywhere on a branch row
     const hide = ev.target.closest(".ct-hide");
     const row = ev.target.closest("[data-id]");
     if (fold) fold.closest(".ct-g").classList.toggle("ct-x");

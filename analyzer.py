@@ -138,18 +138,21 @@ def _cls(fn):
 
 
 def _branch(p, c):
-    """Condition label for descending from node p into its child c, or None."""
+    """(label, line) of the branch entered going from node p into its child c, or None.
+    The line tells two same-looking branches apart (two separate `else` blocks) and is shown on the branch row."""
     if c.type in CASES:
-        return re.split(r":|->|=>|\{", _flat(c), maxsplit=1)[0].strip()
+        return re.split(r":|->|=>|\{", _flat(c), maxsplit=1)[0].strip(), c.start_point.row + 1
     cond = p.child_by_field_name("condition")
     if cond is None and "switch" in p.type:
         cond = p.child_by_field_name("value")
     if cond is None or c == cond:
         return None
     kw = "if" if p.children[0].is_named else _txt(p.children[0])  # if / elif / while / switch / for
-    if c in p.children_by_field_name("alternative"):
-        return None if c.child_by_field_name("condition") is not None else f"else ({kw} {_flat(cond)})"
-    return f"{kw} {_flat(cond)}"
+    if c in p.children_by_field_name("alternative"):  # else-if / elif: the nested if labels its own branch
+        return None if c.child_by_field_name("condition") is not None else ("else", c.start_point.row + 1)
+    if kw == "if" and p.parent is not None and p in p.parent.children_by_field_name("alternative"):
+        kw = "else if"  # if (a) {..} else if (b) {..}
+    return f"{kw} {_flat(cond)}", p.start_point.row + 1
 
 
 # --- Java / Spring helpers ---------------------------------------------------------------------------------
@@ -564,18 +567,20 @@ if __name__ == "__main__":
     assert {f"{e.file}:{e.name}" for e in entries} == {
         "a.py:<module>", "A.java:A.main", "w.ts:go", "x.c:f", "EqpService.java:EqpService.get"}, \
         sorted(f"{e.file}:{e.name}" for e in entries)
-    tree = {f"{f.file}:{f.name}": [(funcs[c].name, conds) for c, conds, _ in f.children] for f in funcs.values()}
+    lab = lambda conds: [c if isinstance(c, str) else c[0] for c in conds]  # branch (label, line) -> label
+    tree = {f"{f.file}:{f.name}": [(funcs[c].name, lab(cs)) for c, cs, _ in f.children] for f in funcs.values()}
     assert tree["a.py:<module>"] == [("main", ["if __name__ == '__main__'"])]
-    assert tree["a.py:main"] == [("helper", ["if x > 0"]), ("Svc.run", ["else (if x > 0)"]),
-                                 ("Svc.__init__", ["else (if x > 0)"])], tree["a.py:main"]
+    assert tree["a.py:main"] == [("helper", ["if x > 0"]), ("Svc.run", ["else"]),
+                                 ("Svc.__init__", ["else"])], tree["a.py:main"]
+    assert [cs for _, cs, _ in funcs["a.py:2:main"].children] == [[("if x > 0", 3)], [("else", 7)], [("else", 7)]]
     assert tree["b.py:helper"] == [("helper2", [])]
-    assert tree["A.java:A.main"] == [("A.run", ["if (a.length > 0)"]), ("A.run", ["if (a.length < 0)"]),
-                                     ("A.run", ["else (if (a.length < 0))"]), ("A.A", [])], tree["A.java:A.main"]
+    assert tree["A.java:A.main"] == [("A.run", ["if (a.length > 0)"]), ("A.run", ["else if (a.length < 0)"]),
+                                     ("A.run", ["else"]), ("A.A", [])], tree["A.java:A.main"]
     assert tree["A.java:A.run"] == [("A.done", ["switch (n)", "case 1"])], tree["A.java:A.run"]
     assert tree["A.java:A.done"] == [("A.done", ["catch (Exception e)"])], tree["A.java:A.done"]
-    assert tree["w.ts:go"] == [("step", ["if n > 1"]), ("stop", ["else (if n > 1)"]), ("step", [])], tree["w.ts:go"]
+    assert tree["w.ts:go"] == [("step", ["if n > 1"]), ("stop", ["else"]), ("step", [])], tree["w.ts:go"]
     assert tree["m.go:S.Run"] == [("work", ["if a > 0"])]
-    assert tree["x.c:f"] == [("g", ["if (a)"]), ("g", ["else (if (a))"])], tree["x.c:f"]
+    assert tree["x.c:f"] == [("g", ["if (a)"]), ("g", ["else"])], tree["x.c:f"]
     assert tree["k.cpp:C.m"] == [("h", ["if (x)"])], tree["k.cpp:C.m"]
     assert tree["k.cs:K.M"] == [("K.N", ["switch a", "case 1"])], tree["k.cs:K.M"]
     assert funcs["b.py:1:helper"].params == "(y)" and funcs["x.c:2:f"].params == "(int a)"
@@ -630,7 +635,7 @@ if __name__ == "__main__":
             void a() { payService.pay(); card.pay(); naver.pay(); kakao.pay(); rule.check(); ruleB.check(); }
         }""",
     })
-    kids = lambda fid: [(funcs[c].name, conds) for c, conds, _ in funcs[fid].children]
+    kids = lambda fid: [(funcs[c].name, lab(cs)) for c, cs, _ in funcs[fid].children]
     assert kids("pay/PayController.java:8:a") == [
         ("BankPay.pay", []), ("CardPay.pay", []), ("NaverPay.pay", []), ("AbstractPay.pay", []),  # Primary/Qualifier/
         ("RuleA.check", ["[구현체 2개 중]"]), ("RuleB.check", ["[구현체 2개 중]"]), ("RuleB.check", [])], \
@@ -662,7 +667,7 @@ def one():
     @PostMapping("/search") public List<User> search(String q) { return null; }
 }''',
     })
-    py = {f.name: [(funcs[c].name, conds) for c, conds, _ in f.children] for f in funcs.values() if f.lang == "python"}
+    py = {f.name: [(funcs[c].name, lab(cs)) for c, cs, _ in f.children] for f in funcs.values() if f.lang == "python"}
     assert py["api_get"] == py["call_api"] == []  # requests.* is the hop itself; its url is only a variable here
     assert py["load_users"] == [("api_get", []), ("UserController.getUsers", ["GET /api/v1/users"])], py
     assert py["load_user"] == [("UserController.getUser", ["GET /api/v1/users/{}"])], py
