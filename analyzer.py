@@ -4,6 +4,8 @@ Spring extra: outgoing HTTP calls (@Value base URL + "/path", or @FeignClient me
 uploaded @XxxMapping controller method whose path matches exactly. Base URLs come from application.yml.
 Calls on injected fields follow Spring DI: interface -> bean implementation (extends / implements, @Component
 family + @Bean methods), narrowed by @Qualifier > @Primary > field name like Spring does.
+Python (UI) HTTP calls - requests / httpx (+ Session / Client objects) and wrappers like api_get("/x") or
+call_api("DELETE", f"{BASE}/x/{id}") - are linked to the same controller endpoints; their base URL is a wildcard.
 """
 import re
 from dataclasses import dataclass
@@ -33,6 +35,11 @@ TYPE_RE = re.compile(r"\b([A-Z]\w*)(?:<[^<>]*>)?\s+(\w+)\s*[;=,)]")  # Java-styl
 QUAL_RE = re.compile(r'@(?:Qualifier\(\s*(?:value\s*=\s*)?|Resource\(\s*name\s*=\s*)"([^"]+)"\s*\)\s*'
                      r'(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:private|protected|public|final|static)\s+)*'
                      r'[A-Z]\w*(?:<[^<>]*>)?\s+(\w+)')  # @Qualifier("x") [final] Type var  (field / ctor / setter param)
+HTTP_UP = {v for v in VERBS.values() if v}  # GET POST PUT DELETE PATCH
+PY_HTTP_LIBS = ("requests", "httpx")
+SESSION_RE = re.compile(r"(\w+)\s*=\s*(?:requests|httpx)\.(?:Session|Client|AsyncClient)\(|"
+                        r"(?:requests|httpx)\.(?:Session|Client|AsyncClient)\([^)]*\)\s+as\s+(\w+)")
+FAMILY = {"typescript": "javascript", "tsx": "javascript", "cpp": "c"}  # name-based calls stay inside a family
 JCLASSES = {"class_declaration", "interface_declaration", "enum_declaration", "record_declaration"}
 STEREO = ("Component", "Service", "Repository", "Controller", "RestController", "Configuration")
 
@@ -178,6 +185,64 @@ def _site(c):
     return n.start_point.row, " ".join(_txt(n).split()).replace("( ", "(").replace(" )", ")")  # multi-line calls
 
 
+def _py_url(n):
+    """Python URL expression -> template, dynamic parts as {}: f"{B}/u/{id}", B + "/u", "{}/u".format(..), "/u/%s" % x."""
+    t = n.type
+    if t == "string":
+        return "".join(_txt(c) if c.type == "string_content" else "{}" if c.type == "interpolation" else ""
+                       for c in n.children)
+    if t == "concatenated_string":
+        return "".join(map(_py_url, n.named_children))
+    if t == "parenthesized_expression" and n.named_children:
+        return _py_url(n.named_children[0])
+    if t == "binary_operator":
+        op, left, right = (_txt(n.child_by_field_name("operator")), n.child_by_field_name("left"),
+                           n.child_by_field_name("right"))
+        if op == "+":
+            return _py_url(left) + _py_url(right)
+        if op == "%":
+            return re.sub(r"%(?:\([^)]*\))?[sdifr]", "{}", _py_url(left))
+    if t == "call" and (f := n.child_by_field_name("function")) is not None and f.type == "attribute" \
+            and _txt(f.child_by_field_name("attribute")) == "format":
+        return _py_url(f.child_by_field_name("object"))
+    return "{}"
+
+
+def _py_path(tmpl):
+    """URL template -> path; the base URL is a wildcard: {}/api/x -> /api/x, http://h:80/api/x -> /api/x."""
+    t = tmpl.split("?")[0].split("#")[0]
+    t = "/" + t.split("://", 1)[1].partition("/")[2] if "://" in t else t.lstrip("{}")
+    return t if len(t) > 1 and t.startswith("/") else None
+
+
+def _py_http(c, sessions):
+    """Python call -> (VERB | None, path, is requests / httpx itself) when it sends an HTTP request, else None.
+    Verb: a "GET"-like string arg / method=, else a verb in the function name (get, api_post, deleteUser)."""
+    fn, args = c.child_by_field_name("function"), c.child_by_field_name("arguments")
+    w = _words(_txt(fn)) if fn is not None else []
+    if not w or args is None or args.type != "argument_list":
+        return None
+    lib = w[0] in PY_HTTP_LIBS or len(w) > 1 and w[-2] in sessions
+    pos = [a for a in args.named_children if a.type != "keyword_argument"]
+    kw = {_txt(a.child_by_field_name("name")): a.child_by_field_name("value")
+          for a in args.named_children if a.type == "keyword_argument"}
+
+    def verb_of(a):
+        v = _py_url(a).upper() if a is not None and a.type == "string" else ""
+        return v if v in HTTP_UP else None
+
+    i = next((i for i, a in enumerate(pos) if verb_of(a)), None)
+    if verb_of(kw.get("method")):  # requests.request(method="PUT", url=...)
+        verb, url = verb_of(kw["method"]), kw.get("url") or (pos[0] if pos else None)
+    elif i is not None:  # requests.request("PUT", url) / call_api("DELETE", url)
+        verb, url = verb_of(pos[i]), kw.get("url") or (pos[i + 1] if i + 1 < len(pos) else None)
+    else:  # requests.get(url) / api_get(url) / fetch(url): no verb -> any
+        parts = [x.upper() for x in re.findall(r"[A-Za-z][a-z]*", w[-1])]
+        verb, url = next((x for x in parts if x in HTTP_UP), None), kw.get("url") or (pos[0] if pos else None)
+    path = _py_path(_py_url(url)) if url is not None else None
+    return (verb, path, lib) if path else None
+
+
 def _verb(n):
     """HTTP verb from the statement holding a URL expression (getForObject / .post() / HttpMethod.PUT)."""
     while n.parent is not None and not n.type.endswith(("statement", "declaration")):
@@ -271,7 +336,7 @@ def _flatten(d, pre=""):
 
 # --- analysis ----------------------------------------------------------------------------------------------
 
-def _calls(body, named, env, urls):
+def _calls(body, named, env, urls, sessions=()):
     calls, http, stack = [], [], [(body, [])] if body is not None else []
     while stack:
         node, conds = stack.pop()
@@ -285,7 +350,10 @@ def _calls(body, named, env, urls):
                           if (n := c.child_by_field_name(k)) is not None), None)
                 obj = c.child_by_field_name("object")  # Java: obj.name(...)
                 w = _words((_txt(obj) + "." if obj is not None else "") + _txt(n)) if n is not None else []
-                if w:
+                h = _py_http(c, sessions) if c.type == "call" else None  # Python
+                if h:
+                    http.append((c.start_byte, h[0], "", h[1], cc, _site(c)))
+                if w and not (h and h[2]):  # requests.get(...) is the HTTP hop itself, not a call into the project
                     calls.append((c.start_byte, w[-1], w[-2] if len(w) > 1 else None, cc, _site(c)))
             elif urls and _is_concat(c) and not _is_concat(node) \
                     and (base := urls.get(_last_word(_txt(_leftmost(c))))) is not None:
@@ -329,6 +397,7 @@ def analyze(files):
                 if var in m:
                     m[field] = m[var]
         env = consts | dict.fromkeys(urls, "")
+        sessions = {v for g in SESSION_RE.findall(text) for v in g if v}  # s = requests.Session()
         types[fname] = {var: t for t, var in TYPE_RE.findall(text)}
         root = get_parser(lang).parse(files[fname]).root_node
         for n in _nodes(root) if lang == "java" else ():
@@ -345,14 +414,14 @@ def analyze(files):
         named = {n.id: n for n in _nodes(root) if n.type in FUNCS and _name(n) and (
             n.child_by_field_name("body") is not None or "FeignClient" in _annos(_owner(n)))}
         mod = Func(f"{fname}:<module>", "<module>", "<module>", None, fname, lang, 1, "", text,
-                   *_calls(root, named, env, urls))
+                   *_calls(root, named, env, urls, sessions))
         funcs[mod.id] = mod
         for n in sorted(named.values(), key=lambda n: n.start_byte):
             simple, cls, line = _name(n), _cls(n), n.start_point.row + 1
             fid = f"{fname}:{line}:{simple}"
             fid += f":{n.start_point.column}" if fid in funcs else ""  # same name twice on one line: A.m() {} B.m() {}
             f = Func(fid, f"{cls}.{simple}" if cls else simple, simple, cls, fname, lang,
-                     line, _params(n), _txt(n), *_calls(n.child_by_field_name("body"), named, env, urls))
+                     line, _params(n), _txt(n), *_calls(n.child_by_field_name("body"), named, env, urls, sessions))
             if lang == "java":
                 eps, feign = _spring(n, env, prop)
                 endpoints += [(f, verb, path) for verb, path in eps]
@@ -409,8 +478,9 @@ def analyze(files):
         edges = []
         rel = lambda site: site and (site[0] + 1, site[1])  # 0-based row -> file line number
         for pos, callee, recv, conds, site in f.calls:
-            cands, t = by_name.get(callee, []), types[f.file].get(recv)
-            hits, mark = [], []
+            fam = FAMILY.get(f.lang, f.lang)
+            cands = [d for d in by_name.get(callee, []) if FAMILY.get(d.lang, d.lang) == fam]
+            t, hits, mark = types[f.file].get(recv), [], []
             if f.lang == "java" and f.cls:  # this / super / injected field / static Class.call()
                 start = {f.cls} if recv in (None, "this") else set(parents.get(f.cls, [])) if recv == "super" \
                     else inject(t, recv, f.file) if t else {recv} if recv in parents else set()
@@ -419,8 +489,11 @@ def analyze(files):
                     mark = [f"[구현체 {len({d.cls for d in hits})}개 중]"]
             # ponytail: name-based fallback tiers when the type route finds nothing: declared type (Foo / FooImpl) >
             # same file > every same-named def. Add real type inference if false edges still show up.
+            # A typed Java receiver with no project body (library type, Spring Data repository interface) goes
+            # nowhere: falling back would tie repo.findAll() to the caller's own findAll().
+            typed = f.lang == "java" and t
             for d in hits or [d for d in cands if t and d.cls in (t, t + "Impl")] or \
-                    [d for d in cands if d.file == f.file] or cands:
+                    ([] if typed else [d for d in cands if d.file == f.file] or cands):
                 edges.append((pos, d, conds + mark, rel(site)))
                 if d is not f:
                     called.add(d.id)
@@ -537,7 +610,9 @@ if __name__ == "__main__":
         "pay/PayService.java": b"public interface PayService { void pay(); }",
         "pay/CardPay.java": b'@Service("cardPay") public class CardPay implements PayService { public void pay() { c(); } '
                             b'void c() {} }',
-        "pay/BankPay.java": b"@Service @Primary public class BankPay implements PayService { public void pay() {} }",
+        "pay/BankPay.java": b"@Service @Primary public class BankPay implements PayService { private final PayRepo repo; "
+                            b"public void pay() { repo.pay(); } }",
+        "pay/PayRepo.java": b"public interface PayRepo extends JpaRepository<Pay, Long> { void pay(); }",  # no body
         "pay/AbstractPay.java": b"public abstract class AbstractPay implements PayService { public void pay() {} }",
         "pay/KakaoPay.java": b"@Service public class KakaoPay extends AbstractPay { void go() { pay(); } }",
         "pay/NaverPay.java": b"public class NaverPay implements PayService { public void pay() {} }",  # bean via @Bean
@@ -561,6 +636,41 @@ if __name__ == "__main__":
         ("RuleA.check", ["[구현체 2개 중]"]), ("RuleB.check", ["[구현체 2개 중]"]), ("RuleB.check", [])], \
         kids("pay/PayController.java:8:a")  # @Bean name / inherited / ambiguous -> all, marked / field name
     assert kids("pay/KakaoPay.java:1:go") == [("AbstractPay.pay", [])]  # inherited, not every pay() around
+    assert kids("pay/BankPay.java:1:pay") == []  # repo.pay(): repository interface, not BankPay.pay itself
+    funcs, _ = analyze({  # Python UI -> Spring API over HTTP; the UI's base URL is a wildcard
+        "ui/api.py": b'''import requests
+session = requests.Session()
+def api_get(path):
+    return requests.get(BASE_URL + path)
+def load_users():
+    return api_get("/api/v1/users")
+def load_user(uid):
+    return session.get(f"{BASE_URL}/api/v1/users/{uid}", timeout=3)
+def remove(uid):
+    call_api("DELETE", "{}/api/v1/users/{}".format(BASE_URL, uid))
+def call_api(method, url):
+    return requests.request(method, url)
+def search(q):
+    return requests.post(BASE_URL + "/api/v1/users/search?q=%s" % q)
+def one():
+    pass
+''',
+        "api/UserController.java": b'''@RestController @RequestMapping("/api/v1/users") class UserController {
+    @GetMapping public List<User> getUsers() { return null; }
+    @GetMapping("/{id}") public User getUser(@PathVariable String id) { return svc.one(id); }
+    @DeleteMapping("/{id}") public void delete(@PathVariable String id) { }
+    @PostMapping("/search") public List<User> search(String q) { return null; }
+}''',
+    })
+    py = {f.name: [(funcs[c].name, conds) for c, conds, _ in f.children] for f in funcs.values() if f.lang == "python"}
+    assert py["api_get"] == py["call_api"] == []  # requests.* is the hop itself; its url is only a variable here
+    assert py["load_users"] == [("api_get", []), ("UserController.getUsers", ["GET /api/v1/users"])], py
+    assert py["load_user"] == [("UserController.getUser", ["GET /api/v1/users/{}"])], py
+    assert py["remove"] == [("call_api", []), ("UserController.delete", ["DELETE /api/v1/users/{}"])], py
+    assert py["search"] == [("UserController.search", ["POST /api/v1/users/search"])], py
+    assert funcs["api/UserController.java:3:getUser"].children == []  # svc.one(): never Python's one()
+    assert funcs["api/UserController.java:3:getUser"].via_http  # reached from another folder over HTTP
+    assert (_py_path("http://h:80/ctx/x?a=1"), _py_path("{}"), _py_path("{}users")) == ("/ctx/x", None, None)
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
     print("ok")
