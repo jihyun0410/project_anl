@@ -43,7 +43,7 @@ class Func:
     code: str
     calls: list    # [(pos, callee, receiver, conds, site)] as written; site = (file row, call code)
     http: list     # [(pos, verb, base url, path, conds, site | None)] outgoing HTTP calls (Feign: no site)
-    children: list = None  # [(Func.id, conds, (line inside this func, call code) | None)] resolved, one per call
+    children: list = None  # [(Func.id, conds, (file line of the call, call code) | None)] resolved, one per call
     via_http: bool = False  # called over HTTP from another top-level folder (so not a first entry point)
     anno: str = ""  # Spring mapping annotation as written, e.g. @GetMapping("/{id}")
 
@@ -322,7 +322,7 @@ def analyze(files):
     called = set()
     for f in funcs.values():
         edges = []
-        rel = lambda site: site and (site[0] - f.line + 2, site[1])  # file row -> line inside f (code popup's numbering)
+        rel = lambda site: site and (site[0] + 1, site[1])  # 0-based row -> file line number
         for pos, callee, recv, conds, site in f.calls:
             cands, t = by_name.get(callee, []), types[f.file].get(recv)
             # ponytail: name-based resolution, tiers: receiver's declared type (Foo / FooImpl) > same file >
@@ -422,11 +422,11 @@ if __name__ == "__main__":
     assert tree["EqpService.java:EqpService.save"] == [("EqpController.create", [f"POST {base}/api/eqp"])]
     assert tree["EqpService.java:EqpService.ping"] == [("Health.health", [f"HTTP {base}/health"])]
     assert tree["EqpController.java:EqpController.find"] == [("EqpController.repo", [])]
-    site = {f"{f.file}:{f.name}": [s for *_, s in f.children] for f in funcs.values()}  # (line inside caller, code)
+    site = {f"{f.file}:{f.name}": [s for *_, s in f.children] for f in funcs.values()}  # (file line, call code)
     assert site["EqpService.java:EqpService.get"] == [
-        (2, "eqpsClient.find(id)"), (3, 'restTemplate.getForObject(eqpsUrl + EQP_API + "/" + id, Eqp.class)')]
+        (6, "eqpsClient.find(id)"), (7, 'restTemplate.getForObject(eqpsUrl + EQP_API + "/" + id, Eqp.class)')]
     assert site["EqpsClient.java:EqpsClient.find"] == [None]  # Feign: the HTTP hop has no call site of its own
-    assert site["EqpService.java:EqpService.ping"] == [(1, 'eqpsUrl + "/health"')], site["EqpService.java:EqpService.ping"]
+    assert site["EqpService.java:EqpService.ping"] == [(10, 'eqpsUrl + "/health"')], site["EqpService.java:EqpService.ping"]
     assert not any(f.via_http for f in funcs.values())  # all in one folder: HTTP targets stay first entries
     anno = {f.name: f.anno for f in funcs.values()}
     assert (anno["EqpController.find"], anno["EqpController.list"], anno["EqpService.get"]) == (
@@ -440,7 +440,7 @@ if __name__ == "__main__":
     assert {e.name for e in entries} == {"S.a", "C.x"} and [e.name for e in entries if not e.via_http] == ["S.a"]
     assert [funcs[c].name for c, *_ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
     assert [(funcs[c].name, s) for c, _, s in funcs["eqps/src/C.java:2:x"].children] == [  # y twice: a row per call
-        ("C.y", (2, "y()")), ("C.z", (3, "z()")), ("C.y", (3, "y()"))]
+        ("C.y", (3, "y()")), ("C.z", (4, "z()")), ("C.y", (4, "y()"))]
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
     print("ok")

@@ -3,9 +3,10 @@ import re
 from html import escape
 
 
-def build(funcs, fid, cap=300, once=False):
+def build(funcs, fid, cap=300, once=False, skip=frozenset()):
     """Unfold the call graph from fid into a tree; cycles are cut, at most cap nodes. -> (root, truncated)
-    once: a func with calls unfolds only at its first row, later rows point up to it (size ~ call edges, no blowup)"""
+    once: a func with calls unfolds only at its first row, later rows point up to it (size ~ call edges, no blowup)
+    skip: files whose funcs are left out, together with everything they call"""
     left, seen = [cap], set()
 
     def rec(fid, conds, site, path):
@@ -15,6 +16,8 @@ def build(funcs, fid, cap=300, once=False):
         n = {"f": funcs[fid], "conds": [_cut(c, 50) for c in conds], "site": site, "loop": loop, "dup": dup,
              "kids": []}
         for cid, cc, cs in [] if loop or dup else funcs[fid].children:
+            if funcs[cid].file in skip:
+                continue
             left[0] -= 1
             if left[0] < 0:
                 break
@@ -49,6 +52,7 @@ def render(root):
                     + call + (blue + " " if blue else "") + anno + f'<b>{escape(_cut(f.name))}</b>{escape(_cut(f.params))} '
                     f'<span class="ct-s">{escape(f.file.rsplit("/", 1)[-1])}:{f.line}</span>'
                     + (" ↻" if n["loop"] else "") + (' <span class="ct-s">↑ 위에서 펼침</span>' if n["dup"] else "")
+                    + (f'<span class="ct-hide" data-file="{escape(f.file)}">✕ 파일 숨기기</span>' if tail else "")
                     + "</div>" + ('<div class="ct-k">' if kids else ""))
         sub = pre + ("" if not tail else "   " if tail == "└─ " else "│  ")
         for i, k in enumerate(kids):
@@ -75,7 +79,7 @@ if __name__ == "__main__":
     assert [re.search(r'data-id="(\w)"', r)[1] for r in rows] == list("raderbgc")
     assert [re.search(r'"ct-p">([^<]*)<', r)[1] for r in rows] == \
         ["", "├─ ", "│  ├─ ", "│  ├─ ", "│  └─ ", "├─ ", "│  └─ ", "└─ "]
-    assert not cut and rows[4].endswith(" ↻</div>") and build(fs, "r", cap=3)[1]
+    assert not cut and ' ↻<span class="ct-hide"' in rows[4] and build(fs, "r", cap=3)[1]
     assert '<span class="ct-l">3행</span> <span class="ct-c">if (x)</span> a(id) <span class="ct-s">→</span> <b>Svc.a'         in html and '<span class="ct-l">4행</span> b(id) <span class="ct-s">→</span> <b>Svc.b' in html
     assert ('<span class="ct-c">if (z)</span> rt.get(url + &quot;/api/eqp/&quot; + id) <span class="ct-s">→</span> '
             '<span class="ct-h">[API 호출] GET http://eqps:8080/api/eqp/{}</span> <b>Svc.c') in html
@@ -87,4 +91,7 @@ if __name__ == "__main__":
     once = re.findall(r'<div class="ct-r".*?</div>', render(build(g, "x", float("inf"), once=True)[0]), re.S)
     assert [re.search(r'data-id="(\w)"', r)[1] for r in once] == list("xywzy") and "위에서 펼침" in once[-1]
     assert render(build(g, "x")[0]).count('class="ct-r"') == 6  # default still unfolds y twice
+    g["w"].file = "util/W.java"  # skipped file: its row and its subtree are gone, the rest stays
+    assert re.findall(r'data-id="(\w)"', render(build(g, "x", skip={"util/W.java"})[0])) == list("xyzy")
+    assert html.count('class="ct-hide"') == len(rows) - 1 and 'data-file="a/Svc.java"' in rows[1]  # all but root
     print("ok")

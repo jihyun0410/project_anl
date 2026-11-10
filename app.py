@@ -1,9 +1,13 @@
+from fnmatch import fnmatch
+from pathlib import Path
+
 import streamlit as st
 
 from analyzer import CONFIG, LANGS, Func, analyze, folder, keep
 from treeview import build, render
 
 MAX_NODES = 300  # inline tree cap; bigger trees open in the popup instead
+EXCLUDE = Path(__file__).with_name("exclude.txt")  # files left out of trees: one path / name / glob per line
 
 CSS = """
 .ct { overflow-x: auto; padding-bottom: 8px; color: var(--st-text-color);
@@ -20,6 +24,8 @@ CSS = """
 .ct-f::before { content: "▾"; }
 .ct-x > .ct-r .ct-f::before { content: "▸"; }
 .ct-x > .ct-k { display: none; }
+.ct-hide { visibility: hidden; margin-left: 12px; color: #e03131; font-size: 11px; }
+.ct-r:hover > .ct-hide { visibility: visible; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {
@@ -31,8 +37,10 @@ export default function ({ data, parentElement, setTriggerValue }) {
   }
   box.onclick = (ev) => {
     const fold = ev.target.closest(".ct-f");
+    const hide = ev.target.closest(".ct-hide");
     const row = ev.target.closest("[data-id]");
     if (fold) fold.closest(".ct-g").classList.toggle("ct-x");
+    else if (hide) setTriggerValue("hide", hide.dataset.file);
     else if (row) setTriggerValue("clicked", row.dataset.id);
   };
   if (box.dataset.src !== data) {  // same tree on a rerun (e.g. after a row click): keep the user's folds
@@ -49,6 +57,8 @@ ss = st.session_state
 ss.setdefault("maps", [])   # [set of top-level folders] analysed together
 ss.setdefault("cache", {})  # frozenset(folders) -> analyze() result
 ss.setdefault("sel", None)  # ("dir", folder) | ("file", path)
+ss.setdefault("excl", EXCLUDE.read_text(encoding="utf-8") if EXCLUDE.exists() else "")
+ss.setdefault("exver", 0)  # bumped when a tree ✕ edits the list: a new text_area key shows the new text
 if ss.get("ver") is not Func:  # analyzer.py changed and was reloaded: cached results hold stale Func objects
     ss.cache, ss.ver = {}, Func
 
@@ -85,6 +95,23 @@ def select(s):
     ss.sel = s
 
 
+def save(text):
+    ss.excl = text
+    EXCLUDE.write_text(text, encoding="utf-8")
+
+
+def hide(path):  # tree ✕: add the file to the exclude list
+    save(ss.excl.rstrip("\n") + "\n" + path if ss.excl.strip() else path)
+    ss.exver += 1
+
+
+def hidden():
+    """Uploaded files matched by the exclude list (full path or file name, globs like *Dto.java, */util/*)."""
+    pats = [x.strip() for x in ss.excl.splitlines() if x.strip() and not x.strip().startswith("#")]
+    return frozenset(p for p in ss.get("files", {})
+                     if any(fnmatch(p, x) or fnmatch(p.rsplit("/", 1)[-1], x) for x in pats))
+
+
 @st.dialog("폴더 Mapping")
 def mapping(folders):
     picked = st.multiselect("함께 분석할 폴더를 선택하세요", folders, format_func=label)
@@ -96,7 +123,9 @@ def mapping(folders):
 
 def detail(f):
     st.markdown(f"`{f.name}{f.params}`  \n{f.file} : {f.line}행")
-    st.code(f.code, language=f.lang, line_numbers=True)
+    lines = f.code.split("\n")  # st.code numbers from 1 only: prefix the file's own line numbers
+    w = len(str(f.line + len(lines) - 1))
+    st.code("\n".join(f"{i:>{w}} │ {x}" for i, x in enumerate(lines, f.line)), language=f.lang)
 
 
 show = st.dialog("메서드 상세", width="large")(detail)
@@ -104,15 +133,18 @@ show = st.dialog("메서드 상세", width="large")(detail)
 
 @st.dialog("전체 트리", width="large")
 def full(funcs, fid):
-    root = build(funcs, fid, float("inf"), once=True)[0]  # repeats point up instead of unfolding again: no cap
-    clicked = TREE(data=f'<div class="ct-full">{render(root)}</div>', key=f"full:{fid}",
-                   on_clicked_change=lambda: None).clicked
-    if clicked:  # one dialog at a time: the code opens below the tree, not in a second popup
-        detail(funcs[clicked])
+    root = build(funcs, fid, float("inf"), once=True, skip=hidden())[0]  # repeats point up, no blowup: no cap
+    r = TREE(data=f'<div class="ct-full">{render(root)}</div>', key=f"full:{fid}",
+             on_clicked_change=lambda: None, on_hide_change=lambda: None)
+    if r.hide:
+        hide(r.hide)
+        st.rerun(scope="fragment")  # redraw the popup tree, keep the popup open
+    if r.clicked:  # one dialog at a time: the code opens below the tree, not in a second popup
+        detail(funcs[r.clicked])
 
 
 def opened(funcs, fid):  # too big to draw inline: open the popup instead and leave the toggle off
-    if ss[f"open:{fid}"] and build(funcs, fid, MAX_NODES)[1]:
+    if ss[f"open:{fid}"] and build(funcs, fid, MAX_NODES, skip=hidden())[1]:
         ss[f"open:{fid}"], ss.popup = False, fid
 
 
@@ -137,6 +169,13 @@ if ss.get("files"):
         for i, m in enumerate(ss.maps):
             st.button(f"🔗 {' + '.join(sorted(map(label, m)))}  ✕", key=f"unmap:{i}", type="tertiary",
                       help="눌러서 Mapping 해제", on_click=ss.maps.remove, args=(m,))
+        k = f"excl:{ss.exver}"
+        st.text_area("트리에서 제외할 파일", ss.excl, key=k, on_change=lambda: save(ss[k]),
+                     placeholder="*Dto.java\n*/util/*\nLogUtil.java",
+                     help="한 줄에 하나: 파일 경로, 파일 이름, 또는 * 패턴. 트리 줄에 마우스를 올려 ✕로도 추가됩니다. "
+                          "exclude.txt에 저장됩니다.")
+        with st.expander(f"제외된 파일 {len(skip := hidden())}개"):
+            st.text("\n".join(sorted(skip)) or "없음")
         for d in folders:
             mapped = len(group(d)) > 1
             with st.expander(f"📁 {label(d)}" + (" 🔗" if mapped else "")):
@@ -158,6 +197,9 @@ else:
     kind, x = ss.sel
     g = group(x if kind == "dir" else folder(x))
     funcs, entries = result(g)
+    skip = hidden()
+    # excluded files' entries go, and so do entries whose tree shrinks to <= 2 rows once excluded calls are gone
+    entries = [e for e in entries if e.file not in skip and (not skip or build(funcs, e.id, 1, skip=skip)[1])]
     if kind == "dir":
         st.subheader("📁 " + " + ".join(sorted(map(label, g))))
         entries = [e for e in entries if not e.via_http]  # first entry points only; the rest hang off their trees
@@ -171,11 +213,15 @@ else:
         sig = f"{e.anno} {e.name}{e.params}".strip().replace("`", "'")  # a stray backtick would break the code span
         if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}",  # only opened trees get drawn
                      on_change=opened, args=(funcs, e.id)):
-            root, cut = build(funcs, e.id, MAX_NODES)
-            clicked = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None).clicked
+            root, cut = build(funcs, e.id, MAX_NODES, skip=skip)
+            r = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None,
+                     on_hide_change=lambda: None)
             if cut:
                 st.caption(f"노드가 많아 {MAX_NODES}개까지만 표시했습니다.")
-            if clicked:
-                show(funcs[clicked])
+            if r.hide:
+                hide(r.hide)
+                st.rerun()
+            if r.clicked:
+                show(funcs[r.clicked])
     if p := ss.pop("popup", None):  # set by opened(); popped so a later rerun doesn't reopen it
         full(funcs, p)
