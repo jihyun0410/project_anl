@@ -44,6 +44,17 @@ class Func:
     calls: list    # [(pos, callee, receiver, conds)] as written
     http: list     # [(pos, verb, base url, path, conds)] outgoing HTTP calls
     children: list = None  # [(Func.id, conds)] resolved
+    via_http: bool = False  # called over HTTP from another top-level folder (so not a first entry point)
+
+
+def folder(path):
+    """Top-level uploaded folder of a relative path; '' for plain file uploads."""
+    return path.split("/", 1)[0] if "/" in path else ""
+
+
+def keep(path):
+    """Build output, dependencies and tests aren't the app's call flow (tests would hide every entry they call)."""
+    return not SKIP & set(path.split("/")[:-1])
 
 
 def _txt(n):
@@ -246,8 +257,7 @@ def _calls(body, named, env, urls):
 
 def analyze(files):
     """files: {relative path: bytes} -> (funcs by id, entry points)"""
-    # build output, dependencies and tests aren't the app's call flow (tests would hide every entry they call)
-    files = {k: v for k, v in files.items() if not SKIP & set(k.split("/")[:-1])}
+    files = {k: v for k, v in files.items() if keep(k)}
     yml = {}
     for fname, src in files.items():
         # only Spring config: a folder upload also brings docker-compose / helm yml that may not even parse
@@ -314,13 +324,15 @@ def analyze(files):
             for d, everb, epath in endpoints:  # HTTP targets stay out of `called`: controllers remain entries
                 if (verb is None or everb is None or verb == everb) and any(_same(w, epath) for w in want):
                     edges.append((pos, d, conds + [f"{verb or 'HTTP'} {base}{path}"]))
+                    d.via_http |= folder(d.file) != folder(f.file)
         f.children, seen = [], set()
         for _, d, conds in sorted(edges, key=lambda e: e[0]):
             if (k := (d.id, tuple(conds))) not in seen:
                 seen.add(k)
                 f.children.append(k[:1] + (conds,))
 
-    entries = [f for f in funcs.values() if f.id not in called and (f.simple != "<module>" or f.children)]
+    entries = [f for f in funcs.values() if f.id not in called and (f.simple != "<module>" or f.children)
+               and not f.file.endswith("RPL.java")]  # *RPL.java: never listed as entries, still shown in trees
     return funcs, entries
 
 
@@ -396,4 +408,14 @@ if __name__ == "__main__":
     assert tree["EqpService.java:EqpService.save"] == [("EqpController.create", [f"POST {base}/api/eqp"])]
     assert tree["EqpService.java:EqpService.ping"] == [("Health.health", [f"HTTP {base}/health"])]
     assert tree["EqpController.java:EqpController.find"] == [("EqpController.repo", [])]
+    assert not any(f.via_http for f in funcs.values())  # all in one folder: HTTP targets stay first entries
+    funcs, entries = analyze({  # two mapped service folders: the HTTP-called controller is no first entry point
+        "caller/src/S.java": b'class S { @Value("${u}") String u; void a() { rt.getForObject(u + "/x", String.class); } }',
+        "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { return ""; } }',
+        "eqps/src/EqpRPL.java": b"class EqpRPL { void handle() { done(); } void done() {} }",  # uncalled, but RPL
+    })
+    assert {e.name for e in entries} == {"S.a", "C.x"} and [e.name for e in entries if not e.via_http] == ["S.a"]
+    assert [funcs[c].name for c, _ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
+    assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
+        ("caller", "", False, True)
     print("ok")
