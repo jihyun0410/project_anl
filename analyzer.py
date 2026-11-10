@@ -2,6 +2,8 @@
 
 Spring extra: outgoing HTTP calls (@Value base URL + "/path", or @FeignClient methods) are linked to the
 uploaded @XxxMapping controller method whose path matches exactly. Base URLs come from application.yml.
+Calls on injected fields follow Spring DI: interface -> bean implementation (extends / implements, @Component
+family + @Bean methods), narrowed by @Qualifier > @Primary > field name like Spring does.
 """
 import re
 from dataclasses import dataclass
@@ -28,6 +30,11 @@ VERBS = {"GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT", "Delet
 VALUE_RE = re.compile(r'@Value\(\s*"([^"]*)"\s*\)\s*(?:(?:private|protected|public|final|static)\s+)*\w+\s+(\w+)')
 CONST_RE = re.compile(r'\b(?:static\s+final|final\s+static)\s+String\s+(\w+)\s*=\s*"([^"]*)"')
 TYPE_RE = re.compile(r"\b([A-Z]\w*)(?:<[^<>]*>)?\s+(\w+)\s*[;=,)]")  # Java-style `Type var` declarations
+QUAL_RE = re.compile(r'@(?:Qualifier\(\s*(?:value\s*=\s*)?|Resource\(\s*name\s*=\s*)"([^"]+)"\s*\)\s*'
+                     r'(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:private|protected|public|final|static)\s+)*'
+                     r'[A-Z]\w*(?:<[^<>]*>)?\s+(\w+)')  # @Qualifier("x") [final] Type var  (field / ctor / setter param)
+JCLASSES = {"class_declaration", "interface_declaration", "enum_declaration", "record_declaration"}
+STEREO = ("Component", "Service", "Repository", "Controller", "RestController", "Configuration")
 
 
 @dataclass
@@ -223,6 +230,28 @@ def _spring(fn, env, prop):
     return [], [(verb, base, pre + p) for p in full]
 
 
+def _supers(cls):
+    """Java class / interface node -> simple names it extends or implements."""
+    out = []
+    for c in cls.children:
+        if c.type in ("superclass", "super_interfaces", "extends_interfaces"):
+            s = _txt(c)
+            for _ in range(5):  # nested generics: Other<Map<String, Integer>> -> Other
+                s = re.sub(r"<[^<>]*>", "", s)
+            out += [_last_word(x) for x in s.split(None, 1)[1].split(",")]
+    return out
+
+
+def _strs(kv, *keys):
+    """String literals of the first present annotation attribute: @Service("x"), @Bean(name = {"a", "b"})."""
+    v = next((kv[k] for k in keys if k in kv), None)
+    return re.findall(r'"([^"]*)"', _txt(v)) if v is not None else []
+
+
+def _bean_name(cls):  # Spring's default bean name: FooService -> fooService, URLService stays
+    return cls if cls[1:2].isupper() else cls[:1].lower() + cls[1:]
+
+
 def _segs(path):
     return [s for s in re.sub(r"\{[^}]*\}", "{}", path.split("?")[0]).split("/") if s]
 
@@ -283,16 +312,36 @@ def analyze(files):
 
     texts = {f: s.decode("utf-8", "replace") for f, s in files.items() if f.rsplit(".", 1)[-1].lower() in LANGS}
     consts = {k: v for t in texts.values() for k, v in CONST_RE.findall(t)}
-    funcs, endpoints, types = {}, [], {}
+    funcs, endpoints, types, quals = {}, [], {}, {}
+    parents, concrete, beans = {}, set(), {}  # Java: class -> supertypes, instantiable classes, bean -> [names, primary]
+
+    def bean(c, names, primary):
+        b = beans.setdefault(c, [set(), False])
+        b[0].update(names)
+        b[1] |= primary
+
     for fname, text in texts.items():
         lang = LANGS[fname.rsplit(".", 1)[-1].lower()]
         urls = {var: prop(p) for p, var in VALUE_RE.findall(text)}  # @Value("${eqps.service-url}") String var
-        for field, var in re.findall(r"this\.(\w+)\s*=\s*(\w+)\s*;", text):  # constructor-injected @Value
-            if var in urls:
-                urls[field] = urls[var]
+        quals[fname] = {var: q for q, var in QUAL_RE.findall(text)}
+        for field, var in re.findall(r"this\.(\w+)\s*=\s*(\w+)\s*;", text):  # constructor / setter injection
+            for m in (urls, quals[fname]):
+                if var in m:
+                    m[field] = m[var]
         env = consts | dict.fromkeys(urls, "")
         types[fname] = {var: t for t, var in TYPE_RE.findall(text)}
         root = get_parser(lang).parse(files[fname]).root_node
+        for n in _nodes(root) if lang == "java" else ():
+            if n.type in JCLASSES and (nm := n.child_by_field_name("name")) is not None:
+                c, a = _txt(nm), _annos(n)
+                parents[c] = _supers(n)
+                if n.type != "interface_declaration" and "abstract" not in \
+                        next((_txt(m).split() for m in n.children if m.type == "modifiers"), []):
+                    concrete.add(c)
+                if any(k in a for k in STEREO):
+                    bean(c, [x for k in STEREO if k in a for x in _strs(a[k], "value")] or [_bean_name(c)],
+                         "Primary" in a)
+                    bean(c, _strs(a.get("Qualifier", {}), "value"), False)
         named = {n.id: n for n in _nodes(root) if n.type in FUNCS and _name(n) and (
             n.child_by_field_name("body") is not None or "FeignClient" in _annos(_owner(n)))}
         mod = Func(f"{fname}:<module>", "<module>", "<module>", None, fname, lang, 1, "", text,
@@ -300,7 +349,9 @@ def analyze(files):
         funcs[mod.id] = mod
         for n in sorted(named.values(), key=lambda n: n.start_byte):
             simple, cls, line = _name(n), _cls(n), n.start_point.row + 1
-            f = Func(f"{fname}:{line}:{simple}", f"{cls}.{simple}" if cls else simple, simple, cls, fname, lang,
+            fid = f"{fname}:{line}:{simple}"
+            fid += f":{n.start_point.column}" if fid in funcs else ""  # same name twice on one line: A.m() {} B.m() {}
+            f = Func(fid, f"{cls}.{simple}" if cls else simple, simple, cls, fname, lang,
                      line, _params(n), _txt(n), *_calls(n.child_by_field_name("body"), named, env, urls))
             if lang == "java":
                 eps, feign = _spring(n, env, prop)
@@ -309,6 +360,11 @@ def analyze(files):
                 f.anno = next((" ".join(_txt(a).split()) for m in n.children if m.type == "modifiers"
                                for a in m.named_children if a.type in ("annotation", "marker_annotation")
                                and _last_word(_txt(a.child_by_field_name("name"))) in VERBS), "")
+                if "Bean" in (ba := _annos(n)):  # @Bean method: its `return new X()` (else return type) is a bean
+                    rt, new = n.child_by_field_name("type"), re.search(r"\breturn\s+new\s+([A-Z]\w*)", f.code)
+                    bean(new[1] if new else _last_word(_txt(rt)) if rt is not None else simple,
+                         (_strs(ba["Bean"], "value", "name") or [simple]) + _strs(ba.get("Qualifier", {}), "value"),
+                         "Primary" in ba)
             funcs[f.id] = f
 
     by_name = {}
@@ -319,17 +375,53 @@ def analyze(files):
         if f.simple in ("__init__", "constructor") and f.cls:  # Foo() / new Foo() -> constructor
             by_name.setdefault(f.cls, []).append(f)
 
+    subs = {}  # type -> instantiable classes that are it or extend / implement it, transitively
+    for c in concrete:
+        seen, todo = set(), [c]
+        while todo:
+            if (x := todo.pop()) not in seen:
+                seen.add(x)
+                todo += parents.get(x, [])
+        for x in seen:
+            subs.setdefault(x, set()).add(c)
+
+    def inject(t, var, file):
+        """Classes a `t`-typed injection point named var resolves to: beans first, then Qualifier > Primary > name."""
+        cs = subs.get(t) or ({t} if t in parents else set())
+        cs = {c for c in cs if c in beans} or cs  # non-bean implementations (test doubles etc.) only as a fallback
+        if len(cs) > 1:
+            q, names = quals[file].get(var), lambda c: beans.get(c, [set()])[0]
+            cs = (q and {c for c in cs if q in names(c)}) or {c for c in cs if beans.get(c, [0, False])[1]} \
+                or {c for c in cs if var in names(c)} or cs
+        return cs
+
+    def lookup(c, name):  # c's own `name` methods, else the nearest inherited ones
+        level, seen = {c}, set()
+        while level:
+            if hit := [d for d in by_name.get(name, []) if d.lang == "java" and d.cls in level]:
+                return hit
+            seen |= level
+            level = {p for x in level for p in parents.get(x, [])} - seen
+        return []
+
     called = set()
     for f in funcs.values():
         edges = []
         rel = lambda site: site and (site[0] + 1, site[1])  # 0-based row -> file line number
         for pos, callee, recv, conds, site in f.calls:
             cands, t = by_name.get(callee, []), types[f.file].get(recv)
-            # ponytail: name-based resolution, tiers: receiver's declared type (Foo / FooImpl) > same file >
-            # every same-named def. Add real type inference if false edges still show up.
-            for d in [d for d in cands if t and d.cls in (t, t + "Impl")] or \
+            hits, mark = [], []
+            if f.lang == "java" and f.cls:  # this / super / injected field / static Class.call()
+                start = {f.cls} if recv in (None, "this") else set(parents.get(f.cls, [])) if recv == "super" \
+                    else inject(t, recv, f.file) if t else {recv} if recv in parents else set()
+                hits = list({d.id: d for c in sorted(start) for d in lookup(c, callee)}.values())
+                if len({d.cls for d in hits}) > 1:
+                    mark = [f"[구현체 {len({d.cls for d in hits})}개 중]"]
+            # ponytail: name-based fallback tiers when the type route finds nothing: declared type (Foo / FooImpl) >
+            # same file > every same-named def. Add real type inference if false edges still show up.
+            for d in hits or [d for d in cands if t and d.cls in (t, t + "Impl")] or \
                     [d for d in cands if d.file == f.file] or cands:
-                edges.append((pos, d, conds, rel(site)))
+                edges.append((pos, d, conds + mark, rel(site)))
                 if d is not f:
                     called.add(d.id)
         for pos, verb, base, path, conds, site in f.http:
@@ -441,6 +533,34 @@ if __name__ == "__main__":
     assert [funcs[c].name for c, *_ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
     assert [(funcs[c].name, s) for c, _, s in funcs["eqps/src/C.java:2:x"].children] == [  # y twice: a row per call
         ("C.y", (3, "y()")), ("C.z", (4, "z()")), ("C.y", (4, "y()"))]
+    funcs, _ = analyze({  # Spring DI: interface -> bean implementation (Qualifier > Primary > field name)
+        "pay/PayService.java": b"public interface PayService { void pay(); }",
+        "pay/CardPay.java": b'@Service("cardPay") public class CardPay implements PayService { public void pay() { c(); } '
+                            b'void c() {} }',
+        "pay/BankPay.java": b"@Service @Primary public class BankPay implements PayService { public void pay() {} }",
+        "pay/AbstractPay.java": b"public abstract class AbstractPay implements PayService { public void pay() {} }",
+        "pay/KakaoPay.java": b"@Service public class KakaoPay extends AbstractPay { void go() { pay(); } }",
+        "pay/NaverPay.java": b"public class NaverPay implements PayService { public void pay() {} }",  # bean via @Bean
+        "pay/PayConfig.java": b"@Configuration class PayConfig { @Bean PayService naverPay() { return new NaverPay(); } }",
+        "pay/FakePay.java": b"public class FakePay implements PayService { public void pay() {} }",  # not a bean
+        "pay/Rule.java": b"interface Rule { void check(); } @Component class RuleA implements Rule { public void check() {} }"
+                         b" @Component class RuleB implements Rule { public void check() {} }",
+        "pay/PayController.java": b"""@RestController class PayController {
+            private final PayService payService;
+            @Qualifier("cardPay") private final PayService card;
+            private final KakaoPay kakao;
+            private final Rule rule;
+            private final Rule ruleB;
+            PayController(@Qualifier("naverPay") PayService naver) { this.naver = naver; }
+            void a() { payService.pay(); card.pay(); naver.pay(); kakao.pay(); rule.check(); ruleB.check(); }
+        }""",
+    })
+    kids = lambda fid: [(funcs[c].name, conds) for c, conds, _ in funcs[fid].children]
+    assert kids("pay/PayController.java:8:a") == [
+        ("BankPay.pay", []), ("CardPay.pay", []), ("NaverPay.pay", []), ("AbstractPay.pay", []),  # Primary/Qualifier/
+        ("RuleA.check", ["[구현체 2개 중]"]), ("RuleB.check", ["[구현체 2개 중]"]), ("RuleB.check", [])], \
+        kids("pay/PayController.java:8:a")  # @Bean name / inherited / ambiguous -> all, marked / field name
+    assert kids("pay/KakaoPay.java:1:go") == [("AbstractPay.pay", [])]  # inherited, not every pay() around
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
     print("ok")

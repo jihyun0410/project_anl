@@ -128,9 +128,6 @@ def detail(f):
     st.code("\n".join(f"{i:>{w}} │ {x}" for i, x in enumerate(lines, f.line)), language=f.lang)
 
 
-show = st.dialog("메서드 상세", width="large")(detail)
-
-
 @st.dialog("전체 트리", width="large")
 def full(funcs, fid):
     root = build(funcs, fid, float("inf"), once=True, skip=hidden())[0]  # repeats point up, no blowup: no cap
@@ -200,28 +197,39 @@ else:
     skip = hidden()
     # excluded files' entries go, and so do entries whose tree shrinks to <= 2 rows once excluded calls are gone
     entries = [e for e in entries if e.file not in skip and (not skip or build(funcs, e.id, 1, skip=skip)[1])]
-    if kind == "dir":
-        st.subheader("📁 " + " + ".join(sorted(map(label, g))))
-        entries = [e for e in entries if not e.via_http]  # first entry points only; the rest hang off their trees
-    else:
-        st.subheader("📄 " + x)
-        entries = [e for e in entries if e.file == x]
-    q = st.text_input("진입점 검색", placeholder="메서드 이름 또는 파일 경로").lower()
-    shown = [e for e in entries if q in f"{e.name} {e.file}".lower()]
-    st.markdown(f"**진입점 {len(shown)}개**" + (f" / 전체 {len(entries)}개" if q else ""))
-    for e in shown:
-        sig = f"{e.anno} {e.name}{e.params}".strip().replace("`", "'")  # a stray backtick would break the code span
-        if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}",  # only opened trees get drawn
-                     on_change=opened, args=(funcs, e.id)):
-            root, cut = build(funcs, e.id, MAX_NODES, skip=skip)
-            r = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None,
-                     on_hide_change=lambda: None)
-            if cut:
-                st.caption(f"노드가 많아 {MAX_NODES}개까지만 표시했습니다.")
-            if r.hide:
-                hide(r.hide)
-                st.rerun()
-            if r.clicked:
-                show(funcs[r.clicked])
-    if p := ss.pop("popup", None):  # set by opened(); popped so a later rerun doesn't reopen it
-        full(funcs, p)
+    # code pane on the right stays in view while the tree list scrolls
+    st.markdown('<style>[data-testid="stColumn"]:has(.st-key-code) { position: sticky; top: 4rem; '
+                'align-self: flex-start; max-height: calc(100vh - 5rem); overflow-y: auto; }</style>',
+                unsafe_allow_html=True)
+    left, right = st.columns([3, 2], gap="medium")
+    with left:
+        if kind == "dir":
+            st.subheader("📁 " + " + ".join(sorted(map(label, g))))
+            entries = [e for e in entries if not e.via_http]  # first entry points only; the rest hang off their trees
+        else:
+            st.subheader("📄 " + x)
+            entries = [e for e in entries if e.file == x]
+        q = st.text_input("진입점 검색", placeholder="메서드 이름 또는 파일 경로").lower()
+        shown = [e for e in entries if q in f"{e.name} {e.file}".lower()]
+        st.markdown(f"**진입점 {len(shown)}개**" + (f" / 전체 {len(entries)}개" if q else ""))
+        for e in shown:
+            sig = f"{e.anno} {e.name}{e.params}".strip().replace("`", "'")  # a stray backtick would break the code span
+            if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}",  # only opened trees get drawn
+                         on_change=opened, args=(funcs, e.id)):
+                root, cut = build(funcs, e.id, MAX_NODES, skip=skip)
+                r = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None,
+                         on_hide_change=lambda: None)
+                if cut:
+                    st.caption(f"노드가 많아 {MAX_NODES}개까지만 표시했습니다.")
+                if r.hide:
+                    hide(r.hide)
+                    st.rerun()
+                if r.clicked:
+                    ss.code = r.clicked
+        if p := ss.pop("popup", None):  # set by opened(); popped so a later rerun doesn't reopen it
+            full(funcs, p)
+    with right, st.container(key="code"):
+        if f := funcs.get(ss.get("code")):
+            detail(f)
+        else:
+            st.caption("트리에서 메서드를 누르면 여기에 코드가 표시됩니다.")
