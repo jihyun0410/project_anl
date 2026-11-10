@@ -4,7 +4,6 @@ from analyzer import CONFIG, LANGS, Func, analyze, folder, keep
 from treeview import build, render
 
 MAX_NODES = 300  # inline tree cap; bigger trees open in the popup instead
-FULL_NODES = 5000  # ponytail: popup cap, cycles/fan-out can blow a tree up to millions of rows; add lazy expand if hit
 
 CSS = """
 .ct { overflow-x: auto; padding-bottom: 8px; color: var(--st-text-color);
@@ -15,6 +14,11 @@ CSS = """
 .ct-c { color: #e03131; font-weight: 700; }
 .ct-h { color: #1c7ed6; font-weight: 700; }
 .ct-full { max-height: 65vh; overflow: auto; }
+.ct-i { display: inline-block; width: 2ch; }
+.ct-f { cursor: pointer; color: #1c7ed6; }
+.ct-f::before { content: "▾"; }
+.ct-x > .ct-r .ct-f::before { content: "▸"; }
+.ct-x > .ct-k { display: none; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {
@@ -24,10 +28,16 @@ export default function ({ data, parentElement, setTriggerValue }) {
     box.className = "ct";
     parentElement.appendChild(box);
   }
-  box.innerHTML = data;
-  box.querySelectorAll("[data-id]").forEach((g) => {
-    g.onclick = () => setTriggerValue("clicked", g.dataset.id);
-  });
+  box.onclick = (ev) => {
+    const fold = ev.target.closest(".ct-f");
+    const row = ev.target.closest("[data-id]");
+    if (fold) fold.closest(".ct-g").classList.toggle("ct-x");
+    else if (row) setTriggerValue("clicked", row.dataset.id);
+  };
+  if (box.dataset.src !== data) {  // same tree on a rerun (e.g. after a row click): keep the user's folds
+    box.dataset.src = data;
+    box.innerHTML = data;
+  }
 }
 """
 TREE = st.components.v2.component("call_tree", css=CSS, js=JS)
@@ -93,11 +103,9 @@ show = st.dialog("메서드 상세", width="large")(detail)
 
 @st.dialog("전체 트리", width="large")
 def full(funcs, fid):
-    root, cut = build(funcs, fid, FULL_NODES)
+    root = build(funcs, fid, float("inf"), once=True)[0]  # repeats point up instead of unfolding again: no cap
     clicked = TREE(data=f'<div class="ct-full">{render(root)}</div>', key=f"full:{fid}",
                    on_clicked_change=lambda: None).clicked
-    if cut:
-        st.caption(f"노드가 너무 많아 {FULL_NODES}개까지만 표시했습니다.")
     if clicked:  # one dialog at a time: the code opens below the tree, not in a second popup
         detail(funcs[clicked])
 
