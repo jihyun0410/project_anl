@@ -1,9 +1,6 @@
-"""Top-down call tree as SVG: boxes + curved arrows, branch conditions as edge labels."""
+"""Indented call tree (├─ └─) as HTML rows; branch conditions in red, every row clickable via data-id."""
 import re
 from html import escape
-
-BOX_H, GAP_X, GAP_Y, PAD = 56, 28, 72, 20
-CH = 7.2  # px per char, 12px monospace; CJK counts double. ponytail: estimated, measure in JS if boxes clip
 
 
 def build(funcs, fid, cap=300):
@@ -12,7 +9,6 @@ def build(funcs, fid, cap=300):
 
     def rec(fid, conds, path):
         n = {"f": funcs[fid], "conds": [_cut(c, 50) for c in conds], "loop": fid in path, "kids": []}
-        n["label"] = " › ".join(n["conds"])
         for cid, cc in [] if n["loop"] else funcs[fid].children:
             left[0] -= 1
             if left[0] < 0:
@@ -23,91 +19,43 @@ def build(funcs, fid, cap=300):
     return rec(fid, [], frozenset()), left[0] < 0
 
 
-def _walk(root):
-    stack = [root]
-    while stack:
-        n = stack.pop()
-        yield n
-        stack.extend(n["kids"])
-
-
-def _w(s):
-    return len(s) + sum(ord(c) > 0x2E7F for c in s)
-
-
 def _cut(s, k=60):
     return s if len(s) <= k else s[:k - 1] + "…"
 
 
-def _lines(n):
-    f = n["f"]
-    return [_cut(f.name) + (" ↻" if n["loop"] else ""), _cut(f.params), f"{f.file.rsplit('/', 1)[-1]}:{f.line}"]
+def render(root):
+    rows = []
 
-
-def _measure(n):
-    n["box"] = max(map(_w, _lines(n))) * CH + PAD
-    n["kw"] = sum(_measure(k) for k in n["kids"]) + GAP_X * max(len(n["kids"]) - 1, 0)
-    n["span"] = max(n["box"], _w(n["label"]) * CH, n["kw"])
-    return n["span"]
-
-
-def _place(n, x, y):
-    n["cx"], n["y"] = x + n["span"] / 2, y
-    x += (n["span"] - n["kw"]) / 2
-    for k in n["kids"]:
-        _place(k, x, y + BOX_H + GAP_Y)
-        x += k["span"] + GAP_X
-
-
-def render(root, uid):
-    """SVG markup; every box carries data-id=<Func.id> for click handling. uid must be unique per page."""
-    _measure(root)
-    _place(root, 0, 4)
-    nodes = list(_walk(root))
-    edges, boxes = [], []
-    for n in nodes:
-        for k in n["kids"]:
-            x1, y1, x2, y2 = round(n["cx"]), n["y"] + BOX_H, round(k["cx"]), k["y"]
-            m = (y1 + y2) // 2
-            edges.append(f'<path class="ct-e" d="M{x1},{y1} C{x1},{m} {x2},{m} {x2},{y2 - 2}" '
-                         f'marker-end="url(#{uid})"/>')
-            if k["conds"]:
-                # branch conditions in red (ct-c); HTTP hops ("GET http://..", upper-case verb) stay plain
-                parts = [escape(c) if re.match(r"[A-Z]+ ", c) else f'<tspan class="ct-c">{escape(c)}</tspan>'
-                         for c in k["conds"]]
-                edges.append(f'<text class="ct-l" x="{x2}" y="{y2 - 12}">{" › ".join(parts)}</text>')
-        f, cx, y = n["f"], round(n["cx"]), n["y"]
-        t1, t2, t3 = map(escape, _lines(n))
+    def rec(n, pre, tail):
+        f = n["f"]
+        # branch conditions in red (ct-c); HTTP hops ("GET http://..", upper-case verb) stay plain
+        conds = " › ".join(escape(c) if re.match(r"[A-Z]+ ", c) else f'<span class="ct-c">{escape(c)}</span>'
+                           for c in n["conds"])
         tip = escape(f.name + f.params + "\n" + f"{f.file}:{f.line}")  # full path lives in the tooltip
-        boxes.append(f'<g class="ct-n" data-id="{escape(f.id)}"><title>{tip}</title>'
-                     f'<rect x="{round(n["cx"] - n["box"] / 2)}" y="{y}" width="{round(n["box"])}" '
-                     f'height="{BOX_H}" rx="3"/><text class="ct-t" x="{cx}" y="{y + 18}">{t1}</text>'
-                     f'<text x="{cx}" y="{y + 34}">{t2}</text><text class="ct-s" x="{cx}" y="{y + 49}">{t3}</text></g>')
-    h = max(n["y"] for n in nodes) + BOX_H + 6
-    return (f'<svg width="{round(root["span"])}" height="{h}" xmlns="http://www.w3.org/2000/svg"><defs>'
-            f'<marker id="{uid}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" '
-            f'orient="auto"><path class="ct-a" d="M0,0L10,5L0,10z"/></marker></defs>'
-            + "".join(edges) + "".join(boxes) + "</svg>")
+        rows.append(f'<div class="ct-r" data-id="{escape(f.id)}" title="{tip}"><span class="ct-p">{pre}{tail}</span>'
+                    + (conds + " " if conds else "") + f'<b>{escape(_cut(f.name))}</b>{escape(_cut(f.params))} '
+                    f'<span class="ct-s">{escape(f.file.rsplit("/", 1)[-1])}:{f.line}</span>'
+                    + (" ↻" if n["loop"] else "") + "</div>")
+        sub = pre + ("" if not tail else "   " if tail == "└─ " else "│  ")
+        for i, k in enumerate(n["kids"]):
+            rec(k, sub, "└─ " if i == len(n["kids"]) - 1 else "├─ ")
+
+    rec(root, "", "")
+    return "".join(rows)
 
 
 if __name__ == "__main__":
     from types import SimpleNamespace as F
-    fs = {k: F(id=k, name=f"Svc.{k}", params="(String id)", file="Svc.java", line=1, children=[]) for k in "rabcdeg"}
+    fs = {k: F(id=k, name=f"Svc.{k}", params="(String id)", file="a/Svc.java", line=1, children=[]) for k in "rabcdeg"}
     fs["r"].children = [("a", ["if (x)"]), ("b", []), ("c", ["GET http://eqps:8080/api/eqp/{}"])]
     fs["a"].children = [("d", []), ("e", []), ("r", ["else (if y)"])]  # r: back to the root -> cycle
     fs["b"].children = [("g", [])]
     root, cut = build(fs, "r")
-    svg = render(root, "t0")
-    rows = {}
-    for n in _walk(root):
-        rows.setdefault(n["y"], []).append((n["cx"] - n["box"] / 2, n["cx"] + n["box"] / 2))
-    for row in rows.values():  # boxes on one level never overlap
-        row.sort()
-        assert all(a[1] <= b[0] for a, b in zip(row, row[1:])), row
-    a = root["kids"][0]
-    assert not cut and a["kids"][2]["loop"] and not a["kids"][2]["kids"]
-    assert a["kids"][0]["cx"] < a["cx"] < a["kids"][2]["cx"]  # parent sits above its children
-    assert build(fs, "r", cap=3)[1]
-    assert 'data-id="a"' in svg and "{}" in svg and len(rows) == 3
-    assert '<tspan class="ct-c">if (x)</tspan>' in svg and ">GET http://eqps:8080/api/eqp/{}</text>" in svg
+    html = render(root)
+    rows = html.split("</div>")[:-1]
+    assert [re.search(r'data-id="(\w)"', r)[1] for r in rows] == list("raderbgc")
+    assert [re.search(r'"ct-p">([^<]*)<', r)[1] for r in rows] == \
+        ["", "├─ ", "│  ├─ ", "│  ├─ ", "│  └─ ", "├─ ", "│  └─ ", "└─ "]
+    assert not cut and rows[4].endswith(" ↻") and build(fs, "r", cap=3)[1]
+    assert '<span class="ct-c">if (x)</span> <b>Svc.a</b>' in html and "</span>GET http://eqps:8080/api/eqp/{} <b>" in html
     print("ok")

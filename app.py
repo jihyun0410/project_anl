@@ -6,18 +6,12 @@ from treeview import build, render
 MAX_NODES = 300  # ponytail: per-tree node cap keeps huge call graphs renderable; add lazy expand if it gets hit
 
 CSS = """
-.ct { overflow-x: auto; padding-bottom: 8px; }
-.ct-n { cursor: pointer; }
-.ct-n rect { fill: #eaf4fd; stroke: #6aaee8; stroke-width: 2; }
-.ct-n:hover rect { fill: #d3e8fb; }
-.ct-n text { fill: #2d3748; font: 12px Consolas, "D2Coding", monospace; text-anchor: middle; }
-.ct-n .ct-t { font-weight: 700; }
-.ct-n .ct-s { fill: #5a6b80; }
-.ct-e { fill: none; stroke: #6aaee8; stroke-width: 2; }
-.ct-a { fill: #6aaee8; }
-.ct-l { font: 11px Consolas, monospace; text-anchor: middle; fill: var(--st-text-color);
-        paint-order: stroke; stroke: var(--st-background-color); stroke-width: 4px; }
-.ct-c { fill: #e03131; font-weight: 700; }
+.ct { overflow-x: auto; padding-bottom: 8px; color: var(--st-text-color);
+      font: 13px/1.7 Consolas, "D2Coding", monospace; }
+.ct-r { white-space: pre; width: max-content; cursor: pointer; border-radius: 3px; }
+.ct-r:hover { background: rgba(106, 174, 232, 0.2); }
+.ct-p, .ct-s { color: #8a99ab; }
+.ct-c { color: #e03131; font-weight: 700; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {
@@ -141,11 +135,11 @@ else:
     q = st.text_input("진입점 검색", placeholder="메서드 이름 또는 파일 경로").lower()
     shown = [e for e in entries if q in f"{e.name} {e.file}".lower()]
     st.markdown(f"**진입점 {len(shown)}개**" + (f" / 전체 {len(entries)}개" if q else ""))
-    for i, e in enumerate(shown):
+    for e in shown:
         sig = f"{e.name}{e.params}".replace("`", "'")  # a stray backtick would break the code span
         if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}"):  # only opened trees get drawn
             root, cut = build(funcs, e.id, MAX_NODES)
-            clicked = TREE(data=render(root, f"ct{i}"), key=f"tree:{e.id}", on_clicked_change=lambda: None).clicked
+            clicked = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None).clicked
             if cut:
                 st.caption(f"노드가 많아 {MAX_NODES}개까지만 표시했습니다.")
             if clicked:
