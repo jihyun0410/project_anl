@@ -45,6 +45,7 @@ class Func:
     http: list     # [(pos, verb, base url, path, conds)] outgoing HTTP calls
     children: list = None  # [(Func.id, conds)] resolved
     via_http: bool = False  # called over HTTP from another top-level folder (so not a first entry point)
+    anno: str = ""  # Spring mapping annotation as written, e.g. @GetMapping("/{id}")
 
 
 def folder(path):
@@ -296,6 +297,9 @@ def analyze(files):
                 eps, feign = _spring(n, env, prop)
                 endpoints += [(f, verb, path) for verb, path in eps]
                 f.http += [(0, verb, base, path, []) for verb, base, path in feign]
+                f.anno = next((" ".join(_txt(a).split()) for m in n.children if m.type == "modifiers"
+                               for a in m.named_children if a.type in ("annotation", "marker_annotation")
+                               and _last_word(_txt(a.child_by_field_name("name"))) in VERBS), "")
             funcs[f.id] = f
 
     by_name = {}
@@ -409,6 +413,9 @@ if __name__ == "__main__":
     assert tree["EqpService.java:EqpService.ping"] == [("Health.health", [f"HTTP {base}/health"])]
     assert tree["EqpController.java:EqpController.find"] == [("EqpController.repo", [])]
     assert not any(f.via_http for f in funcs.values())  # all in one folder: HTTP targets stay first entries
+    anno = {f.name: f.anno for f in funcs.values()}
+    assert (anno["EqpController.find"], anno["EqpController.list"], anno["EqpService.get"]) == (
+        '@GetMapping("/{id}")', '@RequestMapping(value = {"/list", "/all"}, method = RequestMethod.GET)', ""), anno
     funcs, entries = analyze({  # two mapped service folders: the HTTP-called controller is no first entry point
         "caller/src/S.java": b'class S { @Value("${u}") String u; void a() { rt.getForObject(u + "/x", String.class); } }',
         "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { y(); z(); return ""; } void y() {} void z() {} }',

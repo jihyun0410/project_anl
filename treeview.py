@@ -28,12 +28,13 @@ def render(root):
 
     def rec(n, pre, tail):
         f = n["f"]
-        # branch conditions in red (ct-c); HTTP hops ("GET http://..", upper-case verb) stay plain
-        conds = " › ".join(escape(c) if re.match(r"[A-Z]+ ", c) else f'<span class="ct-c">{escape(c)}</span>'
-                           for c in n["conds"])
+        # HTTP hops ("GET http://..", upper-case verb) in blue (ct-h), branch conditions in red (ct-c)
+        conds = " › ".join(f'<span class="ct-h">[API 호출] {escape(c)}</span>' if re.match(r"[A-Z]+ ", c)
+                           else f'<span class="ct-c">{escape(c)}</span>' for c in n["conds"])
+        anno = escape(f.anno) + " " if f.anno and not tail else ""  # root row starts at its @XxxMapping
         tip = escape(f.name + f.params + "\n" + f"{f.file}:{f.line}")  # full path lives in the tooltip
         rows.append(f'<div class="ct-r" data-id="{escape(f.id)}" title="{tip}"><span class="ct-p">{pre}{tail}</span>'
-                    + (conds + " " if conds else "") + f'<b>{escape(_cut(f.name))}</b>{escape(_cut(f.params))} '
+                    + (conds + " " if conds else "") + anno + f'<b>{escape(_cut(f.name))}</b>{escape(_cut(f.params))} '
                     f'<span class="ct-s">{escape(f.file.rsplit("/", 1)[-1])}:{f.line}</span>'
                     + (" ↻" if n["loop"] else "") + "</div>")
         sub = pre + ("" if not tail else "   " if tail == "└─ " else "│  ")
@@ -46,7 +47,8 @@ def render(root):
 
 if __name__ == "__main__":
     from types import SimpleNamespace as F
-    fs = {k: F(id=k, name=f"Svc.{k}", params="(String id)", file="a/Svc.java", line=1, children=[]) for k in "rabcdeg"}
+    fs = {k: F(id=k, name=f"Svc.{k}", params="(String id)", file="a/Svc.java", line=1, children=[],
+               anno='@GetMapping("/x")' if k == "r" else "") for k in "rabcdeg"}
     fs["r"].children = [("a", ["if (x)"]), ("b", []), ("c", ["GET http://eqps:8080/api/eqp/{}"])]
     fs["a"].children = [("d", []), ("e", []), ("r", ["else (if y)"])]  # r: back to the root -> cycle
     fs["b"].children = [("g", [])]
@@ -57,5 +59,7 @@ if __name__ == "__main__":
     assert [re.search(r'"ct-p">([^<]*)<', r)[1] for r in rows] == \
         ["", "├─ ", "│  ├─ ", "│  ├─ ", "│  └─ ", "├─ ", "│  └─ ", "└─ "]
     assert not cut and rows[4].endswith(" ↻") and build(fs, "r", cap=3)[1]
-    assert '<span class="ct-c">if (x)</span> <b>Svc.a</b>' in html and "</span>GET http://eqps:8080/api/eqp/{} <b>" in html
+    assert '<span class="ct-c">if (x)</span> <b>Svc.a</b>' in html
+    assert '<span class="ct-h">[API 호출] GET http://eqps:8080/api/eqp/{}</span> <b>Svc.c' in html
+    assert '</span>@GetMapping(&quot;/x&quot;) <b>Svc.r</b>' in rows[0] and "@GetMapping" not in rows[4]  # root only
     print("ok")

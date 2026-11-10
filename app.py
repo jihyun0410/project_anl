@@ -3,7 +3,8 @@ import streamlit as st
 from analyzer import CONFIG, LANGS, analyze, folder, keep
 from treeview import build, render
 
-MAX_NODES = 300  # ponytail: per-tree node cap keeps huge call graphs renderable; add lazy expand if it gets hit
+MAX_NODES = 300  # inline tree cap; bigger trees open in the popup instead
+FULL_NODES = 5000  # ponytail: popup cap, cycles/fan-out can blow a tree up to millions of rows; add lazy expand if hit
 
 CSS = """
 .ct { overflow-x: auto; padding-bottom: 8px; color: var(--st-text-color);
@@ -12,6 +13,8 @@ CSS = """
 .ct-r:hover { background: rgba(106, 174, 232, 0.2); }
 .ct-p, .ct-s { color: #8a99ab; }
 .ct-c { color: #e03131; font-weight: 700; }
+.ct-h { color: #1c7ed6; font-weight: 700; }
+.ct-full { max-height: 65vh; overflow: auto; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {
@@ -78,10 +81,28 @@ def mapping(folders):
         st.rerun()
 
 
-@st.dialog("메서드 상세", width="large")
-def show(f):
+def detail(f):
     st.markdown(f"`{f.name}{f.params}`  \n{f.file} : {f.line}행")
     st.code(f.code, language=f.lang, line_numbers=True)
+
+
+show = st.dialog("메서드 상세", width="large")(detail)
+
+
+@st.dialog("전체 트리", width="large")
+def full(funcs, fid):
+    root, cut = build(funcs, fid, FULL_NODES)
+    clicked = TREE(data=f'<div class="ct-full">{render(root)}</div>', key=f"full:{fid}",
+                   on_clicked_change=lambda: None).clicked
+    if cut:
+        st.caption(f"노드가 너무 많아 {FULL_NODES}개까지만 표시했습니다.")
+    if clicked:  # one dialog at a time: the code opens below the tree, not in a second popup
+        detail(funcs[clicked])
+
+
+def opened(funcs, fid):  # too big to draw inline: open the popup instead and leave the toggle off
+    if ss[f"open:{fid}"] and build(funcs, fid, MAX_NODES)[1]:
+        ss[f"open:{fid}"], ss.popup = False, fid
 
 
 _, mid, _ = st.columns([1, 2, 1])
@@ -136,11 +157,14 @@ else:
     shown = [e for e in entries if q in f"{e.name} {e.file}".lower()]
     st.markdown(f"**진입점 {len(shown)}개**" + (f" / 전체 {len(entries)}개" if q else ""))
     for e in shown:
-        sig = f"{e.name}{e.params}".replace("`", "'")  # a stray backtick would break the code span
-        if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}"):  # only opened trees get drawn
+        sig = f"{e.anno} {e.name}{e.params}".strip().replace("`", "'")  # a stray backtick would break the code span
+        if st.toggle(f"`{sig}` · {e.file}:{e.line}", key=f"open:{e.id}",  # only opened trees get drawn
+                     on_change=opened, args=(funcs, e.id)):
             root, cut = build(funcs, e.id, MAX_NODES)
             clicked = TREE(data=render(root), key=f"tree:{e.id}", on_clicked_change=lambda: None).clicked
             if cut:
                 st.caption(f"노드가 많아 {MAX_NODES}개까지만 표시했습니다.")
             if clicked:
                 show(funcs[clicked])
+    if p := ss.pop("popup", None):  # set by opened(); popped so a later rerun doesn't reopen it
+        full(funcs, p)
