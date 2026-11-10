@@ -1,6 +1,6 @@
 import streamlit as st
 
-from analyzer import CONFIG, LANGS, analyze, folder, keep
+from analyzer import CONFIG, LANGS, Func, analyze, folder, keep
 from treeview import build, render
 
 MAX_NODES = 300  # inline tree cap; bigger trees open in the popup instead
@@ -38,6 +38,8 @@ ss = st.session_state
 ss.setdefault("maps", [])   # [set of top-level folders] analysed together
 ss.setdefault("cache", {})  # frozenset(folders) -> analyze() result
 ss.setdefault("sel", None)  # ("dir", folder) | ("file", path)
+if ss.get("ver") is not Func:  # analyzer.py changed and was reloaded: cached results hold stale Func objects
+    ss.cache, ss.ver = {}, Func
 
 
 def unique(files):  # plain file uploads may share a name across services: Foo.java, Foo(2).java
