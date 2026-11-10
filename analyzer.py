@@ -41,9 +41,9 @@ class Func:
     line: int
     params: str
     code: str
-    calls: list    # [(pos, callee, receiver, conds)] as written
-    http: list     # [(pos, verb, base url, path, conds)] outgoing HTTP calls
-    children: list = None  # [(Func.id, conds)] resolved
+    calls: list    # [(pos, callee, receiver, conds, site)] as written; site = (file row, call code)
+    http: list     # [(pos, verb, base url, path, conds, site | None)] outgoing HTTP calls (Feign: no site)
+    children: list = None  # [(Func.id, conds, (line inside this func, call code) | None)] resolved, one per call
     via_http: bool = False  # called over HTTP from another top-level folder (so not a first entry point)
     anno: str = ""  # Spring mapping annotation as written, e.g. @GetMapping("/{id}")
 
@@ -162,6 +162,15 @@ def _eval(n, env):
     return env.get(_last_word(_txt(n)), "{}")
 
 
+def _site(c):
+    """(0-based row, call code) of a call; a URL concat reports the call it's passed to, if any."""
+    p = c
+    while p is not None and p.type not in CALLS and p.type not in FUNCS:
+        p = p.parent
+    n = p if p is not None and p.type in CALLS else c
+    return n.start_point.row, " ".join(_txt(n).split()).replace("( ", "(").replace(" )", ")")  # multi-line calls
+
+
 def _verb(n):
     """HTTP verb from the statement holding a URL expression (getForObject / .post() / HttpMethod.PUT)."""
     while n.parent is not None and not n.type.endswith(("statement", "declaration")):
@@ -248,10 +257,10 @@ def _calls(body, named, env, urls):
                 obj = c.child_by_field_name("object")  # Java: obj.name(...)
                 w = _words((_txt(obj) + "." if obj is not None else "") + _txt(n)) if n is not None else []
                 if w:
-                    calls.append((c.start_byte, w[-1], w[-2] if len(w) > 1 else None, cc))
+                    calls.append((c.start_byte, w[-1], w[-2] if len(w) > 1 else None, cc, _site(c)))
             elif urls and _is_concat(c) and not _is_concat(node) \
                     and (base := urls.get(_last_word(_txt(_leftmost(c))))) is not None:
-                http.append((c.start_byte, _verb(c), base, _eval(c, env), cc))  # eqpsUrl + "/api/x"
+                http.append((c.start_byte, _verb(c), base, _eval(c, env), cc, _site(c)))  # eqpsUrl + "/api/x"
             stack.append((c, cc))
     return calls, http
 
@@ -296,7 +305,7 @@ def analyze(files):
             if lang == "java":
                 eps, feign = _spring(n, env, prop)
                 endpoints += [(f, verb, path) for verb, path in eps]
-                f.http += [(0, verb, base, path, []) for verb, base, path in feign]
+                f.http += [(0, verb, base, path, [], None) for verb, base, path in feign]
                 f.anno = next((" ".join(_txt(a).split()) for m in n.children if m.type == "modifiers"
                                for a in m.named_children if a.type in ("annotation", "marker_annotation")
                                and _last_word(_txt(a.child_by_field_name("name"))) in VERBS), "")
@@ -313,30 +322,31 @@ def analyze(files):
     called = set()
     for f in funcs.values():
         edges = []
-        for pos, callee, recv, conds in f.calls:
+        rel = lambda site: site and (site[0] - f.line + 2, site[1])  # file row -> line inside f (code popup's numbering)
+        for pos, callee, recv, conds, site in f.calls:
             cands, t = by_name.get(callee, []), types[f.file].get(recv)
             # ponytail: name-based resolution, tiers: receiver's declared type (Foo / FooImpl) > same file >
             # every same-named def. Add real type inference if false edges still show up.
             for d in [d for d in cands if t and d.cls in (t, t + "Impl")] or \
                     [d for d in cands if d.file == f.file] or cands:
-                edges.append((pos, d, conds))
+                edges.append((pos, d, conds, rel(site)))
                 if d is not f:
                     called.add(d.id)
-        for pos, verb, base, path, conds in f.http:
+        for pos, verb, base, path, conds, site in f.http:
             # service-url's own path (e.g. /eqps) may be the target's context-path or part of its mapping
             want = (path, urlparse(base).path + path)
             for d, everb, epath in endpoints:  # HTTP targets stay out of `called`: controllers remain entries
                 if (verb is None or everb is None or verb == everb) and any(_same(w, epath) for w in want):
-                    edges.append((pos, d, conds + [f"{verb or 'HTTP'} {base}{path}"]))
+                    edges.append((pos, d, conds + [f"{verb or 'HTTP'} {base}{path}"], rel(site)))
                     d.via_http |= folder(d.file) != folder(f.file)
         f.children, seen = [], set()
-        for _, d, conds in sorted(edges, key=lambda e: e[0]):
-            if (k := (d.id, tuple(conds))) not in seen:
+        for pos, d, conds, site in sorted(edges, key=lambda e: e[0]):
+            if (k := (d.id, tuple(conds), pos)) not in seen:  # one row per call site
                 seen.add(k)
-                f.children.append(k[:1] + (conds,))
+                f.children.append((d.id, conds, site))
 
     def deep(f):  # its tree shows 2+ rows under it: one row (a leaf or a self-call ↻) is not worth listing
-        return len(f.children) > 1 or any(c != f.id and funcs[c].children for c, _ in f.children)
+        return len(f.children) > 1 or any(c != f.id and funcs[c].children for c, *_ in f.children)
 
     # shallow (<= 2-row tree) and *RPL.java funcs are never listed as entries; they still show up inside trees
     entries = [f for f in funcs.values() if f.id not in called and deep(f) and not f.file.endswith("RPL.java")]
@@ -389,7 +399,7 @@ if __name__ == "__main__":
     assert {f"{e.file}:{e.name}" for e in entries} == {
         "a.py:<module>", "A.java:A.main", "w.ts:go", "x.c:f", "EqpService.java:EqpService.get"}, \
         sorted(f"{e.file}:{e.name}" for e in entries)
-    tree = {f"{f.file}:{f.name}": [(funcs[c].name, conds) for c, conds in f.children] for f in funcs.values()}
+    tree = {f"{f.file}:{f.name}": [(funcs[c].name, conds) for c, conds, _ in f.children] for f in funcs.values()}
     assert tree["a.py:<module>"] == [("main", ["if __name__ == '__main__'"])]
     assert tree["a.py:main"] == [("helper", ["if x > 0"]), ("Svc.run", ["else (if x > 0)"]),
                                  ("Svc.__init__", ["else (if x > 0)"])], tree["a.py:main"]
@@ -412,17 +422,25 @@ if __name__ == "__main__":
     assert tree["EqpService.java:EqpService.save"] == [("EqpController.create", [f"POST {base}/api/eqp"])]
     assert tree["EqpService.java:EqpService.ping"] == [("Health.health", [f"HTTP {base}/health"])]
     assert tree["EqpController.java:EqpController.find"] == [("EqpController.repo", [])]
+    site = {f"{f.file}:{f.name}": [s for *_, s in f.children] for f in funcs.values()}  # (line inside caller, code)
+    assert site["EqpService.java:EqpService.get"] == [
+        (2, "eqpsClient.find(id)"), (3, 'restTemplate.getForObject(eqpsUrl + EQP_API + "/" + id, Eqp.class)')]
+    assert site["EqpsClient.java:EqpsClient.find"] == [None]  # Feign: the HTTP hop has no call site of its own
+    assert site["EqpService.java:EqpService.ping"] == [(1, 'eqpsUrl + "/health"')], site["EqpService.java:EqpService.ping"]
     assert not any(f.via_http for f in funcs.values())  # all in one folder: HTTP targets stay first entries
     anno = {f.name: f.anno for f in funcs.values()}
     assert (anno["EqpController.find"], anno["EqpController.list"], anno["EqpService.get"]) == (
         '@GetMapping("/{id}")', '@RequestMapping(value = {"/list", "/all"}, method = RequestMethod.GET)', ""), anno
     funcs, entries = analyze({  # two mapped service folders: the HTTP-called controller is no first entry point
         "caller/src/S.java": b'class S { @Value("${u}") String u; void a() { rt.getForObject(u + "/x", String.class); } }',
-        "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { y(); z(); return ""; } void y() {} void z() {} }',
+        "eqps/src/C.java": b'@RestController class C {\n @GetMapping("/x") String x() {\n y();\n z(); y(); return ""; }'
+                           b' void y() {} void z() {} }',
         "eqps/src/EqpRPL.java": b"class EqpRPL { void handle() { done(); } void done() {} }",  # uncalled, but RPL
     })
     assert {e.name for e in entries} == {"S.a", "C.x"} and [e.name for e in entries if not e.via_http] == ["S.a"]
-    assert [funcs[c].name for c, _ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
+    assert [funcs[c].name for c, *_ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
+    assert [(funcs[c].name, s) for c, _, s in funcs["eqps/src/C.java:2:x"].children] == [  # y twice: a row per call
+        ("C.y", (2, "y()")), ("C.z", (3, "z()")), ("C.y", (3, "y()"))]
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
     print("ok")

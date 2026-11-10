@@ -13,6 +13,7 @@ CSS = """
 .ct-p, .ct-s { color: #8a99ab; }
 .ct-c { color: #e03131; font-weight: 700; }
 .ct-h { color: #1c7ed6; font-weight: 700; }
+.ct-l { font-weight: 700; padding: 0 3px; border-radius: 3px; background: rgba(134, 142, 150, 0.18); }
 .ct-full { max-height: 65vh; overflow: auto; }
 .ct-i { display: inline-block; width: 2ch; }
 .ct-f { cursor: pointer; color: #1c7ed6; }
