@@ -14,6 +14,7 @@ LANGS = {"py": "python", "java": "java", "js": "javascript", "jsx": "javascript"
          "ts": "typescript", "tsx": "tsx", "go": "go", "c": "c", "h": "c",
          "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "cs": "csharp"}
 CONFIG = {"yml", "yaml"}
+SKIP = {"node_modules", ".git", "target", "build", "dist", "venv", ".venv", "__pycache__", "test", "tests"}
 FUNCS = {"function_definition", "function_declaration", "generator_function_declaration", "method_definition",
          "method_declaration", "constructor_declaration", "local_function_statement",
          "arrow_function", "function_expression"}  # anonymous ones are analysed inline in their parent
@@ -244,10 +245,13 @@ def _calls(body, named, env, urls):
 
 
 def analyze(files):
-    """files: {filename: bytes} -> (funcs by id, entry points)"""
+    """files: {relative path: bytes} -> (funcs by id, entry points)"""
+    # build output, dependencies and tests aren't the app's call flow (tests would hide every entry they call)
+    files = {k: v for k, v in files.items() if not SKIP & set(k.split("/")[:-1])}
     yml = {}
     for fname, src in files.items():
-        if fname.rsplit(".", 1)[-1].lower() in CONFIG:
+        # only Spring config: a folder upload also brings docker-compose / helm yml that may not even parse
+        if fname.rsplit(".", 1)[-1].lower() in CONFIG and fname.rsplit("/", 1)[-1].startswith("application"):
             for doc in yaml.safe_load_all(src):
                 for k, v in _flatten(doc).items():
                     yml.setdefault(k, v)  # ponytail: first yml document (default profile) wins
@@ -358,6 +362,10 @@ if __name__ == "__main__":
             private Eqp repo(String id) { return null; }
         }""",
         "Health.java": b'@RestController class Health { @GetMapping("/eqps/health") String health() { return "ok"; } }',
+        # folder upload noise: ignored, or EqpService.get would stop being an entry / yaml would fail to parse
+        "svc/src/test/java/EqpServiceTest.java": b"class T { @Test void t() { new EqpService().get(\"1\", true); } }",
+        "svc/node_modules/x/index.js": b"function get() {}",
+        "helm/templates/deploy.yaml": b"{{ .Values.x }}: [",
     })
     assert {f"{e.file}:{e.name}" for e in entries} == {
         "a.py:<module>", "b.py:unused", "A.java:A.main", "w.ts:go", "m.go:S.Run", "x.c:f", "k.cpp:C.m", "k.cs:K.M",

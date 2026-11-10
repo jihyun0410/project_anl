@@ -39,7 +39,7 @@ def _cut(s, k=60):
 
 def _lines(n):
     f = n["f"]
-    return [_cut(f.name) + (" ↻" if n["loop"] else ""), _cut(f.params), f"{f.file}:{f.line}"]
+    return [_cut(f.name) + (" ↻" if n["loop"] else ""), _cut(f.params), f"{f.file.rsplit('/', 1)[-1]}:{f.line}"]
 
 
 def _measure(n):
@@ -74,7 +74,8 @@ def render(root, uid):
                              f'{escape(_cut(k["label"], 70))}</text>')
         f, cx, y = n["f"], round(n["cx"]), n["y"]
         t1, t2, t3 = map(escape, _lines(n))
-        boxes.append(f'<g class="ct-n" data-id="{escape(f.id)}"><title>{escape(f.name + f.params)}</title>'
+        tip = escape(f.name + f.params + "\n" + f"{f.file}:{f.line}")  # full path lives in the tooltip
+        boxes.append(f'<g class="ct-n" data-id="{escape(f.id)}"><title>{tip}</title>'
                      f'<rect x="{round(n["cx"] - n["box"] / 2)}" y="{y}" width="{round(n["box"])}" '
                      f'height="{BOX_H}" rx="3"/><text class="ct-t" x="{cx}" y="{y + 18}">{t1}</text>'
                      f'<text x="{cx}" y="{y + 34}">{t2}</text><text class="ct-s" x="{cx}" y="{y + 49}">{t3}</text></g>')

@@ -38,7 +38,7 @@ st.set_page_config(page_title="소스 진입점 분석기", layout="wide")
 st.title("소스 진입점 분석기")
 
 
-def unique(files):  # same file name from different services: Foo.java, Foo(2).java
+def unique(files):  # plain file uploads may share a name across services: Foo.java, Foo(2).java
     out = {}
     for f in files:
         stem, dot, ext = f.name.rpartition(".")
@@ -51,8 +51,10 @@ def unique(files):  # same file name from different services: Foo.java, Foo(2).j
 
 _, mid, _ = st.columns([1, 2, 1])
 with mid:
-    files = st.file_uploader("소스 파일과 application.yml을 끌어다 놓거나 선택하세요 (여러 개 가능)",
-                             type=sorted(LANGS.keys() | CONFIG), accept_multiple_files=True)
+    folder = st.radio("업로드 단위", ["폴더", "파일"], horizontal=True) == "폴더"
+    files = st.file_uploader("프로젝트 폴더를 선택하세요 (다시 선택하면 폴더가 추가됩니다)" if folder else
+                             "소스 파일과 application.yml을 끌어다 놓거나 선택하세요 (여러 개 가능)",
+                             type=sorted(LANGS.keys() | CONFIG), accept_multiple_files="directory" if folder else True)
     if st.button("분석", type="primary", disabled=not files):
         st.session_state.result = analyze(unique(files))
 
@@ -65,10 +67,12 @@ def show(f):
 
 if res := st.session_state.get("result"):
     funcs, entries = res
-    st.subheader(f"진입점 {len(entries)}개")
-    for i, e in enumerate(entries):
+    q = st.text_input("진입점 검색", placeholder="메서드 이름 또는 파일 경로").lower()
+    shown = [e for e in entries if q in f"{e.name} {e.file}".lower()]
+    st.subheader(f"진입점 {len(shown)}개" + (f" / 전체 {len(entries)}개" if q else ""))
+    for i, e in enumerate(shown):
         label = f"{e.name}{e.params}".replace("`", "'")  # a stray backtick would break the code span
-        with st.expander(f"`{label}` · {e.file}:{e.line}"):
+        if st.toggle(f"`{label}` · {e.file}:{e.line}", key=f"open:{e.id}"):  # only opened trees get drawn
             root, cut = build(funcs, e.id, MAX_NODES)
             clicked = TREE(data=render(root, f"ct{i}"), key=f"tree:{e.id}", on_clicked_change=lambda: None).clicked
             if cut:
