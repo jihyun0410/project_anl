@@ -331,8 +331,11 @@ def analyze(files):
                 seen.add(k)
                 f.children.append(k[:1] + (conds,))
 
-    # leaf (one-row tree) and *RPL.java funcs are never listed as entries; they still show up inside trees
-    entries = [f for f in funcs.values() if f.id not in called and f.children and not f.file.endswith("RPL.java")]
+    def deep(f):  # its tree shows 2+ rows under it: one row (a leaf or a self-call ↻) is not worth listing
+        return len(f.children) > 1 or any(c != f.id and funcs[c].children for c, _ in f.children)
+
+    # shallow (<= 2-row tree) and *RPL.java funcs are never listed as entries; they still show up inside trees
+    entries = [f for f in funcs.values() if f.id not in called and deep(f) and not f.file.endswith("RPL.java")]
     return funcs, entries
 
 
@@ -342,7 +345,7 @@ if __name__ == "__main__":
                 b"        pass\n    else:\n        Svc(x).run()\nclass Svc:\n    def __init__(self, v): self.v = v\n"
                 b"    def run(self): return self.v\nif __name__ == '__main__':\n    main(1)\n",
         "b.py": b"def helper(y):\n    for i in range(y):\n        helper2(i)\ndef helper2(z):\n    helper2(z)\n"
-                b"def unused(): pass\n",
+                b"def unused(): pass\ndef rec(n): rec(n)\n",
         "A.java": b"class A { public static void main(String[] a) { if (a.length > 0) run(1); else if (a.length < 0) "
                   b"run(2); else run(0); new A(); } A() {} static void run(int n) { switch (n) { case 1: done(); "
                   b"break; } } static void done() { try { x(); } catch (Exception e) { done(); } } }",
@@ -380,9 +383,7 @@ if __name__ == "__main__":
         "helm/templates/deploy.yaml": b"{{ .Values.x }}: [",
     })
     assert {f"{e.file}:{e.name}" for e in entries} == {
-        "a.py:<module>", "A.java:A.main", "w.ts:go", "m.go:S.Run", "x.c:f", "k.cpp:C.m", "k.cs:K.M",
-        "EqpService.java:EqpService.get", "EqpService.java:EqpService.save", "EqpService.java:EqpService.ping",
-        "EqpController.java:EqpController.find"}, \
+        "a.py:<module>", "A.java:A.main", "w.ts:go", "x.c:f", "EqpService.java:EqpService.get"}, \
         sorted(f"{e.file}:{e.name}" for e in entries)
     tree = {f"{f.file}:{f.name}": [(funcs[c].name, conds) for c, conds in f.children] for f in funcs.values()}
     assert tree["a.py:<module>"] == [("main", ["if __name__ == '__main__'"])]
@@ -410,11 +411,10 @@ if __name__ == "__main__":
     assert not any(f.via_http for f in funcs.values())  # all in one folder: HTTP targets stay first entries
     funcs, entries = analyze({  # two mapped service folders: the HTTP-called controller is no first entry point
         "caller/src/S.java": b'class S { @Value("${u}") String u; void a() { rt.getForObject(u + "/x", String.class); } }',
-        "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { return ""; } }',
+        "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { y(); z(); return ""; } void y() {} void z() {} }',
         "eqps/src/EqpRPL.java": b"class EqpRPL { void handle() { done(); } void done() {} }",  # uncalled, but RPL
     })
-    assert [e.name for e in entries] == ["S.a"]  # C.x: HTTP target with no calls of its own -> leaf, not listed
-    assert funcs["eqps/src/C.java:1:x"].via_http
+    assert {e.name for e in entries} == {"S.a", "C.x"} and [e.name for e in entries if not e.via_http] == ["S.a"]
     assert [funcs[c].name for c, _ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
