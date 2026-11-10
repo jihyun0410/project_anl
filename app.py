@@ -17,6 +17,7 @@ CSS = """
 .ct-a { fill: #6aaee8; }
 .ct-l { font: 11px Consolas, monospace; text-anchor: middle; fill: var(--st-text-color);
         paint-order: stroke; stroke: var(--st-background-color); stroke-width: 4px; }
+.ct-c { fill: #e03131; font-weight: 700; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {

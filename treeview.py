@@ -1,4 +1,5 @@
 """Top-down call tree as SVG: boxes + curved arrows, branch conditions as edge labels."""
+import re
 from html import escape
 
 BOX_H, GAP_X, GAP_Y, PAD = 56, 28, 72, 20
@@ -9,16 +10,17 @@ def build(funcs, fid, cap=300):
     """Unfold the call graph from fid into a tree; cycles are cut, at most cap nodes. -> (root, truncated)"""
     left = [cap]
 
-    def rec(fid, label, path):
-        n = {"f": funcs[fid], "label": label, "loop": fid in path, "kids": []}
-        for cid, conds in [] if n["loop"] else funcs[fid].children:
+    def rec(fid, conds, path):
+        n = {"f": funcs[fid], "conds": [_cut(c, 50) for c in conds], "loop": fid in path, "kids": []}
+        n["label"] = " › ".join(n["conds"])
+        for cid, cc in [] if n["loop"] else funcs[fid].children:
             left[0] -= 1
             if left[0] < 0:
                 break
-            n["kids"].append(rec(cid, " › ".join(conds), path | {fid}))
+            n["kids"].append(rec(cid, cc, path | {fid}))
         return n
 
-    return rec(fid, "", frozenset()), left[0] < 0
+    return rec(fid, [], frozenset()), left[0] < 0
 
 
 def _walk(root):
@@ -45,7 +47,7 @@ def _lines(n):
 def _measure(n):
     n["box"] = max(map(_w, _lines(n))) * CH + PAD
     n["kw"] = sum(_measure(k) for k in n["kids"]) + GAP_X * max(len(n["kids"]) - 1, 0)
-    n["span"] = max(n["box"], _w(_cut(n["label"], 70)) * CH, n["kw"])
+    n["span"] = max(n["box"], _w(n["label"]) * CH, n["kw"])
     return n["span"]
 
 
@@ -69,9 +71,11 @@ def render(root, uid):
             m = (y1 + y2) // 2
             edges.append(f'<path class="ct-e" d="M{x1},{y1} C{x1},{m} {x2},{m} {x2},{y2 - 2}" '
                          f'marker-end="url(#{uid})"/>')
-            if k["label"]:
-                edges.append(f'<text class="ct-l" x="{x2}" y="{y2 - 12}"><title>{escape(k["label"])}</title>'
-                             f'{escape(_cut(k["label"], 70))}</text>')
+            if k["conds"]:
+                # branch conditions in red (ct-c); HTTP hops ("GET http://..", upper-case verb) stay plain
+                parts = [escape(c) if re.match(r"[A-Z]+ ", c) else f'<tspan class="ct-c">{escape(c)}</tspan>'
+                         for c in k["conds"]]
+                edges.append(f'<text class="ct-l" x="{x2}" y="{y2 - 12}">{" › ".join(parts)}</text>')
         f, cx, y = n["f"], round(n["cx"]), n["y"]
         t1, t2, t3 = map(escape, _lines(n))
         tip = escape(f.name + f.params + "\n" + f"{f.file}:{f.line}")  # full path lives in the tooltip
@@ -104,5 +108,6 @@ if __name__ == "__main__":
     assert not cut and a["kids"][2]["loop"] and not a["kids"][2]["kids"]
     assert a["kids"][0]["cx"] < a["cx"] < a["kids"][2]["cx"]  # parent sits above its children
     assert build(fs, "r", cap=3)[1]
-    assert 'data-id="a"' in svg and "if (x)" in svg and "{}" in svg and len(rows) == 3
+    assert 'data-id="a"' in svg and "{}" in svg and len(rows) == 3
+    assert '<tspan class="ct-c">if (x)</tspan>' in svg and ">GET http://eqps:8080/api/eqp/{}</text>" in svg
     print("ok")
