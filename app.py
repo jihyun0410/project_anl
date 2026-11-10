@@ -12,20 +12,29 @@ EXCLUDE = Path(__file__).with_name("exclude.txt")  # files left out of trees: on
 CSS = """
 .ct { overflow-x: auto; padding-bottom: 8px; color: var(--st-text-color);
       font: 13px/1.7 Consolas, "D2Coding", monospace; }
-.ct-r { white-space: pre; width: max-content; cursor: pointer; border-radius: 3px; }
+.ct-r { display: flex; align-items: flex-start; position: relative; cursor: pointer; border-radius: 3px; }
+.ct-t { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 30ch; }  /* long text wraps under its indent */
 .ct-r:hover { background: rgba(106, 174, 232, 0.2); }
 .ct-p, .ct-s { color: #8a99ab; }
 .ct-c { color: #e03131; font-weight: 700; }
 .ct-h { color: #1c7ed6; font-weight: 700; }
 .ct-l { font-weight: 700; padding: 0 3px; border-radius: 3px; background: rgba(134, 142, 150, 0.18); }
 .ct-full { max-height: 65vh; overflow: auto; }
-.ct-i { display: inline-block; width: 2ch; }
+.ct-p { display: flex; flex: none; align-self: stretch; }  /* full row height: guides run past wrapped lines */
+.ct-p > span { position: relative; width: 3ch; white-space: pre; color: transparent; }
+.ct-v::before, .ct-j::before, .ct-e::before { content: ""; position: absolute; left: 0.5ch; top: 0; bottom: 0;
+  border-left: 1px solid #8a99ab; }
+.ct-e::before { bottom: auto; height: 0.85em; }
+.ct-j::after, .ct-e::after { content: ""; position: absolute; left: 0.5ch; width: 1.5ch; top: 0.85em;
+  border-top: 1px solid #8a99ab; }
+.ct-i { display: inline-block; width: 2ch; flex: none; }
 .ct-f { cursor: pointer; color: #1c7ed6; }
 .ct-f::before { content: "▾"; }
 .ct-x > .ct-r .ct-f::before { content: "▸"; }
 .ct-x > .ct-k { display: none; }
-.ct-hide { visibility: hidden; margin-left: 12px; color: #e03131; font-size: 11px; }
-.ct-r:hover > .ct-hide { visibility: visible; }
+.ct-hide { display: none; position: absolute; top: 0; right: 4px; padding: 0 6px; border-radius: 3px;
+  color: #e03131; font-size: 11px; background: var(--st-background-color); }  /* overlays: takes no row space */
+.ct-r:hover .ct-hide { display: inline; }
 """
 JS = """
 export default function ({ data, parentElement, setTriggerValue }) {

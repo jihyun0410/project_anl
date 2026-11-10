@@ -4,6 +4,13 @@ import re
 from html import escape
 
 HTTP = re.compile(r"[A-Z]+ ")  # inline label "GET http://.." = HTTP hop (blue); others, e.g. "[구현체 2개 중]", red
+CELL = {"│": "ct-v", "├": "ct-j", "└": "ct-e", " ": "ct-0"}  # tree guide cell -> CSS that draws its lines
+
+
+def _cells(glyphs):
+    """'│  ├─ ' -> one 3-char cell per level. CSS draws the guides (the glyphs stay as invisible text), so a
+    wrapped row keeps its │ lines down to the next row."""
+    return "".join(f'<span class="{CELL[glyphs[i]]}">{glyphs[i:i + 3]}</span>' for i in range(0, len(glyphs), 3))
 
 
 def build(funcs, fid, cap=300, once=False, skip=frozenset()):
@@ -18,8 +25,7 @@ def build(funcs, fid, cap=300, once=False, skip=frozenset()):
         loop = fid in path
         dup = once and not loop and fid in seen and bool(funcs[fid].children)
         seen.add(fid)
-        n = {"f": funcs[fid], "conds": [_cut(c, 50) for c in inline], "site": site, "loop": loop, "dup": dup,
-             "kids": []}
+        n = {"f": funcs[fid], "conds": inline, "site": site, "loop": loop, "dup": dup, "kids": []}
         opened = []  # [(branch, branch node)] open right now, outermost first
         for cid, cc, cs in [] if loop or dup else funcs[fid].children:
             if funcs[cid].file in skip:
@@ -33,7 +39,7 @@ def build(funcs, fid, cap=300, once=False, skip=frozenset()):
                 k += 1
             del opened[k:]
             for b in branch[k:]:
-                node = {"cond": (_cut(b[0], 50), b[1]), "kids": []}
+                node = {"cond": b, "kids": []}
                 (opened[-1][1] if opened else n)["kids"].append(node)
                 opened.append((b, node))
             (opened[-1][1] if opened else n)["kids"].append(
@@ -43,20 +49,19 @@ def build(funcs, fid, cap=300, once=False, skip=frozenset()):
     return rec(fid, [], None, frozenset()), left[0] < 0
 
 
-def _cut(s, k=60):
-    return s if len(s) <= k else s[:k - 1] + "…"
-
-
 def render(root):
-    """Each node is <div ct-g>row<div ct-k>kids</div></div>: the ct-f marker folds a node's ct-k (JS side)."""
+    """Each node is <div ct-g>row<div ct-k>kids</div></div>: the ct-f marker folds a node's ct-k (JS side).
+    A row is prefix + fold marker + ct-t text; nothing is cut, long text wraps inside ct-t under its own indent."""
     rows = []
 
     def rec(n, pre, tail):
         kids = n["kids"]
         if "cond" in n:  # branch row: line + condition, the calls inside it below
             label, ln = n["cond"]
-            row = (f'<div class="ct-r ct-b"><span class="ct-p">{pre}{tail}</span><span class="ct-i ct-f"></span>'
-                   f'<span class="ct-l">{ln}행</span> <span class="ct-c">{escape(label)}</span></div>')
+            row = (f'<div class="ct-r ct-b"><span class="ct-p">{_cells(pre + tail)}</span>'
+                   '<span class="ct-i ct-f"></span>'
+                   f'<span class="ct-t"><span class="ct-l">{ln}행</span> <span class="ct-c">{escape(label)}</span>'
+                   '</span></div>')
         else:
             # caller line + call code, then the callee: "3행 svc.get(id) → [API 호출] GET http://.. Svc.get(..)"
             f = n["f"]
@@ -65,17 +70,17 @@ def render(root):
                               if HTTP.match(c))
             ln, code = n["site"] or (None, None)
             call = (f'<span class="ct-l">{ln}행</span> ' if ln else "") + (red + " " if red else "") \
-                + (f'{escape(_cut(code))} <span class="ct-s">→</span> ' if code else "")
+                + (f'{escape(code)} <span class="ct-s">→</span> ' if code else "")
             anno = escape(f.anno) + " " if f.anno and not tail else ""  # root row starts at its @XxxMapping
             tip = escape(f.name + f.params + "\n" + f"{f.file}:{f.line}")  # full path lives in the tooltip
             row = (f'<div class="ct-r" data-id="{escape(f.id)}" title="{tip}">'
-                   f'<span class="ct-p">{pre}{tail}</span><span class="ct-i{" ct-f" if kids else ""}"></span>'
-                   + call + (blue + " " if blue else "") + anno
-                   + f'<b>{escape(_cut(f.name))}</b>{escape(_cut(f.params))} '
+                   f'<span class="ct-p">{_cells(pre + tail)}</span><span class="ct-i{" ct-f" if kids else ""}"></span>'
+                   '<span class="ct-t">' + call + (blue + " " if blue else "") + anno
+                   + f'<b>{escape(f.name)}</b>{escape(f.params)} '
                    f'<span class="ct-s">{escape(f.file.rsplit("/", 1)[-1])}:{f.line}</span>'
                    + (" ↻" if n["loop"] else "") + (' <span class="ct-s">↑ 위에서 펼침</span>' if n["dup"] else "")
                    + (f'<span class="ct-hide" data-file="{escape(f.file)}">✕ 파일 숨기기</span>' if tail else "")
-                   + "</div>")
+                   + "</span></div>")
         rows.append('<div class="ct-g">' + row + ('<div class="ct-k">' if kids else ""))
         sub = pre + ("" if not tail else "   " if tail == "└─ " else "│  ")
         for i, k in enumerate(kids):
@@ -90,7 +95,8 @@ if __name__ == "__main__":
     from types import SimpleNamespace as F
 
     def outline(html):  # [(tree prefix, call id or branch label)] per row
-        return [(re.search(r'"ct-p">([^<]*)<', r)[1], (re.search(r'data-id="(\w)"', r) or
+        return [(re.sub(r"<[^>]+>", "", re.search(r'"ct-p">(.*?)</span><span class="ct-i', r)[1]),
+                 (re.search(r'data-id="(\w)"', r) or
                  re.search(r'class="ct-c">([^<]*)<', r))[1]) for r in re.findall(r'<div class="ct-r.*?</div>', html, re.S)]
 
     fs = {k: F(id=k, name=f"Svc.{k}", params="(String id)", file="a/Svc.java", line=1, children=[],
@@ -107,12 +113,16 @@ if __name__ == "__main__":
         ("   └─ ", "c")], outline(html)
     assert html.count('class="ct-k"') == html.count("ct-f") == 6  # r, a, b and the 3 branches fold; leaves don't
     assert html.count("<div") == html.count("</div>") and html.count('class="ct-hide"') == 7  # call rows but root
-    assert '<span class="ct-l">3행</span> <span class="ct-c">if (x)</span></div>' in html  # branch row
+    assert '<span class="ct-t"><span class="ct-l">3행</span> <span class="ct-c">if (x)</span></span></div>' in html
     assert '<span class="ct-l">3행</span> a(id) <span class="ct-s">→</span> <b>Svc.a' in html  # call row below it
     assert ('<span class="ct-l">6행</span> rt.get(url + &quot;/api/eqp/&quot; + id) <span class="ct-s">→</span> '
             '<span class="ct-h">[API 호출] GET http://eqps:8080/api/eqp/{}</span> <b>Svc.c') in html
     assert not cut and build(fs, "r", cap=3)[1] and "@GetMapping(&quot;/x&quot;) <b>Svc.r</b>" in html
     assert html.count("@GetMapping") == 1 and ' ↻<span class="ct-hide"' in html  # annotation on the root only
+    long = "(String alpha, String beta, String gamma, String delta, String epsilon, String zeta, String eta)"
+    fs["g"].params, fs["b"].children = long, [("g", [("if (" + "x != 1 && " * 12 + "y)", 4)], None)]
+    html = render(build(fs, "r")[0])
+    assert long in html and "if (" + "x != 1 &amp;&amp; " * 12 + "y)" in html and "…" not in html  # nothing cut
     h = {k: F(id=k, name=k, params="()", file="f", line=1, children=[], anno="") for k in "xyz"}
     h["x"].children = [("y", [("else", 3)], None), ("z", [("else", 7)], None)]  # two separate else blocks
     assert outline(render(build(h, "x")[0])) == [("", "x"), ("├─ ", "else"), ("│  └─ ", "y"), ("└─ ", "else"),

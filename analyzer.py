@@ -76,8 +76,8 @@ def _txt(n):
     return n.text.decode("utf-8", "replace")
 
 
-def _flat(n, limit=80):
-    return " ".join(_txt(n).split())[:limit]
+def _flat(n):  # whole text on one line: long conditions / params are wrapped by the tree, never cut
+    return " ".join(_txt(n).split())
 
 
 def _words(s):
@@ -120,7 +120,7 @@ def _name(fn):
 
 def _params(fn):
     p = _first_field(fn, "parameters", "parameter")
-    t = _flat(p, 200) if p is not None else "()"
+    t = _flat(p) if p is not None else "()"
     return t if t.startswith("(") else f"({t})"
 
 
@@ -642,6 +642,10 @@ if __name__ == "__main__":
         kids("pay/PayController.java:8:a")  # @Bean name / inherited / ambiguous -> all, marked / field name
     assert kids("pay/KakaoPay.java:1:go") == [("AbstractPay.pay", [])]  # inherited, not every pay() around
     assert kids("pay/BankPay.java:1:pay") == []  # repo.pay(): repository interface, not BankPay.pay itself
+    cond = "x > 1 && x < 100 && x != 5 && x != 7 && x != 9 && x != 11 && x != 13 && x != 15 && x != 17"
+    params = "(String alpha, String beta, String gamma, String delta, " * 4 + "String omega)"
+    funcs, _ = analyze({"L.java": f"class L {{ void a{params} {{ if ({cond}) b(); }} void b() {{}} }}".encode()})
+    assert funcs["L.java:1:a"].children[0][1] == [(f"if ({cond})", 1)] and funcs["L.java:1:a"].params == params
     funcs, _ = analyze({  # Python UI -> Spring API over HTTP; the UI's base URL is a wildcard
         "ui/api.py": b'''import requests
 session = requests.Session()
