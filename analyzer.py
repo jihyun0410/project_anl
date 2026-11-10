@@ -331,8 +331,8 @@ def analyze(files):
                 seen.add(k)
                 f.children.append(k[:1] + (conds,))
 
-    entries = [f for f in funcs.values() if f.id not in called and (f.simple != "<module>" or f.children)
-               and not f.file.endswith("RPL.java")]  # *RPL.java: never listed as entries, still shown in trees
+    # leaf (one-row tree) and *RPL.java funcs are never listed as entries; they still show up inside trees
+    entries = [f for f in funcs.values() if f.id not in called and f.children and not f.file.endswith("RPL.java")]
     return funcs, entries
 
 
@@ -380,10 +380,9 @@ if __name__ == "__main__":
         "helm/templates/deploy.yaml": b"{{ .Values.x }}: [",
     })
     assert {f"{e.file}:{e.name}" for e in entries} == {
-        "a.py:<module>", "b.py:unused", "A.java:A.main", "w.ts:go", "m.go:S.Run", "x.c:f", "k.cpp:C.m", "k.cs:K.M",
+        "a.py:<module>", "A.java:A.main", "w.ts:go", "m.go:S.Run", "x.c:f", "k.cpp:C.m", "k.cs:K.M",
         "EqpService.java:EqpService.get", "EqpService.java:EqpService.save", "EqpService.java:EqpService.ping",
-        "EqpController.java:EqpController.find", "EqpController.java:EqpController.create",
-        "EqpController.java:EqpController.list", "Health.java:Health.health"}, \
+        "EqpController.java:EqpController.find"}, \
         sorted(f"{e.file}:{e.name}" for e in entries)
     tree = {f"{f.file}:{f.name}": [(funcs[c].name, conds) for c, conds in f.children] for f in funcs.values()}
     assert tree["a.py:<module>"] == [("main", ["if __name__ == '__main__'"])]
@@ -414,7 +413,8 @@ if __name__ == "__main__":
         "eqps/src/C.java": b'@RestController class C { @GetMapping("/x") String x() { return ""; } }',
         "eqps/src/EqpRPL.java": b"class EqpRPL { void handle() { done(); } void done() {} }",  # uncalled, but RPL
     })
-    assert {e.name for e in entries} == {"S.a", "C.x"} and [e.name for e in entries if not e.via_http] == ["S.a"]
+    assert [e.name for e in entries] == ["S.a"]  # C.x: HTTP target with no calls of its own -> leaf, not listed
+    assert funcs["eqps/src/C.java:1:x"].via_http
     assert [funcs[c].name for c, _ in funcs["eqps/src/EqpRPL.java:1:handle"].children] == ["EqpRPL.done"]
     assert (folder("caller/src/S.java"), folder("S.java"), keep("a/src/test/T.java"), keep("a/src/T.java")) == \
         ("caller", "", False, True)
